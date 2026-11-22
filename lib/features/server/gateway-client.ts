@@ -5,7 +5,19 @@ import {
   type ServiceReadinessSnapshot,
 } from "../types.ts";
 
-const HEALTH_TIMEOUT_MS = 8_000;
+const HEALTH_TIMEOUT_MS = 5_000;
+const HEALTH_SINGLEFLIGHT_TTL_MS = 1_500;
+
+let inFlightHealth: {
+  baseKey: string;
+  promise: Promise<ServiceReadinessSnapshot>;
+} | null = null;
+
+let cachedHealth: {
+  baseKey: string;
+  expiresAt: number;
+  snapshot: ServiceReadinessSnapshot;
+} | null = null;
 
 const UPSTREAM_ENDPOINTS = {
   health: "/health",
@@ -126,8 +138,9 @@ function buildUnavailableReadiness(
   };
 }
 
-export async function fetchGatewayHealth(): Promise<ServiceReadinessSnapshot> {
-  const base = resolveGatewayBaseUrl();
+async function fetchGatewayHealthUncoalesced(
+  base: URL | null,
+): Promise<ServiceReadinessSnapshot> {
   if (!base) {
     return buildUnavailableReadiness("unconfigured");
   }
@@ -150,9 +163,16 @@ export async function fetchGatewayHealth(): Promise<ServiceReadinessSnapshot> {
         string,
         { ready?: boolean; reachable?: boolean; latency_ms?: number | null }
       >;
-    };
+    } | null;
 
-    const models = raw.models ?? {};
+    const models =
+      raw &&
+      typeof raw === "object" &&
+      !Array.isArray(raw) &&
+      raw.models &&
+      typeof raw.models === "object"
+        ? raw.models
+        : {};
     let readyCount = 0;
 
     const features = Object.fromEntries(
@@ -197,6 +217,39 @@ export async function fetchGatewayHealth(): Promise<ServiceReadinessSnapshot> {
   } catch {
     return buildUnavailableReadiness("down");
   }
+}
+
+export async function fetchGatewayHealth(): Promise<ServiceReadinessSnapshot> {
+  const base = resolveGatewayBaseUrl();
+  const baseKey = base ? base.href : "unconfigured";
+  const now = Date.now();
+
+  if (
+    cachedHealth &&
+    cachedHealth.baseKey === baseKey &&
+    now < cachedHealth.expiresAt
+  ) {
+    return cachedHealth.snapshot;
+  }
+
+  if (inFlightHealth && inFlightHealth.baseKey === baseKey) {
+    return inFlightHealth.promise;
+  }
+
+  const promise = fetchGatewayHealthUncoalesced(base).then((snapshot) => {
+    cachedHealth = {
+      baseKey,
+      expiresAt: Date.now() + HEALTH_SINGLEFLIGHT_TTL_MS,
+      snapshot,
+    };
+    if (inFlightHealth?.promise === promise) {
+      inFlightHealth = null;
+    }
+    return snapshot;
+  });
+
+  inFlightHealth = { baseKey, promise };
+  return promise;
 }
 
 function isTimeoutError(error: unknown): boolean {

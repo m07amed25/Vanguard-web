@@ -5,7 +5,7 @@ colors:
   # Core brand palette from the public homepage.
   primary: "#1c7304"
   brand-highlight: "#2ea309"
-  canvas: "#1a1a1a"
+  canvas: "#08080a"
   surface: "#111411"
   surface-raised: "#161a16"
   text: "#e2ebe0"
@@ -131,7 +131,7 @@ components:
     padding: "0.25rem 0.5rem"
   navigation-current:
     backgroundColor: "{colors.surface-selected}"
-    textColor: "{colors.accent-text}"
+    textColor: "{colors.text}"
     typography: "{typography.label}"
     rounded: "{rounded.control-small}"
     padding: "0.5rem 0.75rem"
@@ -142,7 +142,7 @@ components:
 
 ## Overview
 
-This is the proposed design reference for the Vanguard AV scanning workspace. The [local app](app/page.tsx) is still a placeholder. The values below specify what to build and verify on the first real screens. The `.impeccable/design.json` sidecar previews representative components; neither file applies styles to the running app.
+This is the design reference for the Vanguard AV scanning workspace (`/features` and `/features/{url,email,sms,office,pdf,exe}`). The workspace uses a dedicated self-contained shell (`WorkspaceShell`: persistent `15rem` grouped left rail on desktop, compact `56px` sticky mobile header with an accessible `radix-ui` `Dialog` drawer and `<noscript><details>` fallback, and quiet Home/Contact footer links), an above-the-fold single-item `ImmediateTriageWorkbench` with bounded non-decompressing content-signature verification and transient single-consume in-memory handoff, and a domain-grouped `FeatureHubDirectory` — keeping the public marketing homepage (`/`) untouched. The `.impeccable/design.json` sidecar previews representative components; neither file applies styles to the running app.
 
 The workspace inherits the Vanguard helmet and wordmark, green-black surfaces, and Outfit typography. It uses quiet panels and a clear reading order so people can find the scan action, understand a verdict, and see what to do next.
 

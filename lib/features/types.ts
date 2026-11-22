@@ -30,11 +30,31 @@ export type RiskTier =
   | "CRITICAL"
   | "UNAVAILABLE";
 
+export type FeatureDomainGroup =
+  | "Links & Destinations"
+  | "Messages"
+  | "Files & Binaries";
+
+export type FeatureIconKey =
+  | "overview"
+  | "link"
+  | "mail"
+  | "message-square"
+  | "file-spreadsheet"
+  | "file-text"
+  | "binary";
+
+export interface FeatureGroupDefinition {
+  readonly category: FeatureDomainGroup;
+  readonly slugs: readonly FeatureSlug[];
+}
+
 export interface ScanningFeatureDefinition {
   readonly slug: FeatureSlug;
   readonly name: string;
   readonly shortLabel: string;
-  readonly category: "Links & Destinations" | "Messages" | "Files & Binaries";
+  readonly category: FeatureDomainGroup;
+  readonly iconKey: FeatureIconKey;
   readonly summary: string;
   readonly route: `/features/${FeatureSlug}`;
   readonly apiPath: `/api/features/${FeatureSlug}`;
@@ -47,9 +67,100 @@ export interface ScanningFeatureDefinition {
   readonly maxBatchItems: number | null;
   readonly timeoutMs: number;
   readonly batchTimeoutMs: number | null;
+  readonly hasBatchMode: boolean;
   readonly hasAdvancedOptions: boolean;
   readonly staticSafetyNote: string;
 }
+
+export type FileScannerSlug = "email" | "office" | "pdf" | "exe";
+
+export type DetectedContentKind =
+  | FileScannerSlug
+  | "generic-zip"
+  | "image"
+  | "archive"
+  | "executable-other"
+  | "text-unstructured"
+  | "polyglot"
+  | "unknown";
+
+export type FileSignatureFailureCode =
+  | "validation_error"
+  | "payload_too_large"
+  | "unsupported_content"
+  | "extension_mismatch";
+
+export interface FileClassificationInput {
+  readonly filename: string;
+  readonly totalSizeBytes: number;
+  readonly prefixBytes: Uint8Array;
+  readonly tailBytes?: Uint8Array;
+  readonly expectedSlug?: FileScannerSlug;
+}
+
+export type FileSignatureResult =
+  | {
+      ok: true;
+      targetSlug: FileScannerSlug;
+      detectedLabel: string;
+      claimedExtension: string | null;
+      isExtensionless: boolean;
+    }
+  | {
+      ok: false;
+      code: FileSignatureFailureCode;
+      httpStatus: 400 | 413 | 422;
+      message: string;
+      fieldError: string;
+      claimedExtension: string | null;
+      detectedKind: DetectedContentKind;
+    };
+
+export type TriageMode = "file" | "url" | "sms";
+
+export interface TriageDraftState {
+  file: File | null;
+  url: string;
+  sms: string;
+}
+
+export type PendingTriageHandoff =
+  | {
+      readonly id: string;
+      readonly kind: "file";
+      readonly slug: FileScannerSlug;
+      readonly mode: "single";
+      readonly file: File;
+      readonly autoSubmit: true;
+      readonly createdAt: number;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "url";
+      readonly slug: "url";
+      readonly mode: "single";
+      readonly text: string;
+      readonly autoSubmit: true;
+      readonly createdAt: number;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "url";
+      readonly slug: "url";
+      readonly mode: "batch";
+      readonly text: string;
+      readonly autoSubmit: false;
+      readonly createdAt: number;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "sms";
+      readonly slug: "sms";
+      readonly mode: "single" | "batch";
+      readonly text: string;
+      readonly autoSubmit: boolean;
+      readonly createdAt: number;
+    };
 
 export interface FeatureReadinessItem {
   slug: FeatureSlug;

@@ -78,7 +78,7 @@ export async function POST(request: Request) {
 
   const filename = sanitizeDisplayFilename(fileEntry.name, "document.pdf");
   const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-  const validation = validatePdfBytes(bytes);
+  const validation = validatePdfBytes(bytes, filename);
   if (!validation.ok) {
     return scanErrorResponse({
       status: validation.httpStatus,

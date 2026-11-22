@@ -54,7 +54,7 @@ export async function POST(request: Request) {
 
   const filename = sanitizeDisplayFilename(fileEntry.name, "document.docx");
   const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-  const validation = validateOfficeBytes(bytes);
+  const validation = validateOfficeBytes(bytes, filename);
   if (!validation.ok) {
     return scanErrorResponse({
       status: validation.httpStatus,

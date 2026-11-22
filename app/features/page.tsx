@@ -1,30 +1,28 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
-import { FeatureHubSkeleton } from "@/components/features/feature-hub-cards";
-import { HubReadinessStream } from "@/components/features/readiness-stream";
+import { FeatureHubDirectory } from "@/components/features/feature-hub-directory";
+import { ImmediateTriageWorkbench } from "@/components/features/immediate-triage-workbench";
 
 export const metadata: Metadata = {
   title: "Security Scanners — Vanguard AV",
   description:
-    "Choose a Vanguard AV static security scanner for emails, SMS messages, Office documents, PDFs, or Windows executables.",
+    "Inspect suspicious URLs, emails, SMS messages, Office documents, PDFs, or Windows executables statically without executing files or visiting links.",
 };
 
 export default function FeaturesHubPage() {
   return (
-    <div className="w-full space-y-8">
+    <div className="mx-auto w-full max-w-[42rem] space-y-10 sm:pt-4">
       <header className="space-y-1.5">
-        <h1 className="text-[1.75rem] leading-[2.125rem] font-bold tracking-[-0.02em] text-foreground sm:text-[2rem] sm:leading-[2.5rem]">
+        <h1 className="text-2xl font-medium tracking-[-0.02em] text-foreground sm:text-[1.75rem] sm:leading-tight">
           Security Scanners
         </h1>
-        <p className="max-w-[65ch] text-base leading-6 text-muted-foreground">
-          Choose a static inspection tool. Submissions are analyzed without executing files or
-          opening links, and results are never stored.
+        <p className="text-sm text-pretty text-muted-foreground">
+          Static inspection only — files never run, links never open.
         </p>
       </header>
 
-      <Suspense fallback={<FeatureHubSkeleton />}>
-        <HubReadinessStream />
-      </Suspense>
+      <ImmediateTriageWorkbench />
+
+      <FeatureHubDirectory />
     </div>
   );
 }

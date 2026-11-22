@@ -1,4 +1,8 @@
-import type { FeatureSlug, ScanningFeatureDefinition } from "./types.ts";
+import type {
+  FeatureGroupDefinition,
+  FeatureSlug,
+  ScanningFeatureDefinition,
+} from "./types.ts";
 
 export const FIVE_MIB = 5 * 1024 * 1024;
 export const TWENTY_FIVE_MIB = 25 * 1024 * 1024;
@@ -12,34 +16,52 @@ export const URL_MAX_LENGTH = 8_192;
 export const URL_MAX_BATCH_ITEMS = 256;
 export const URL_MAX_ID_LENGTH = 128;
 
+export const FEATURE_DOMAIN_GROUPS: readonly FeatureGroupDefinition[] = [
+  {
+    category: "Links & Destinations",
+    slugs: ["url"],
+  },
+  {
+    category: "Messages",
+    slugs: ["email", "sms"],
+  },
+  {
+    category: "Files & Binaries",
+    slugs: ["office", "pdf", "exe"],
+  },
+] as const;
+
 export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
   {
     slug: "url",
     name: "URL Phishing & Malware Scanning",
     shortLabel: "URL",
     category: "Links & Destinations",
+    iconKey: "link",
     summary:
-      "Score HTTP(S) URLs and bare domains offline across a 5-branch fusion ensemble with WHATWG host/path parsing and 18 lexical features.",
+      "Inspect HTTP(S) URLs and domains offline for phishing patterns, suspicious subdomains, and obfuscated paths.",
     route: "/features/url",
     apiPath: "/api/features/url",
     inputKind: "text-or-batch",
     acceptedExtensions: [".txt", ".csv", ".json", ".jsonl"],
     formatLabel: "HTTP(S) URL or bare host · .txt / .csv / .json / .jsonl",
-    limitLabel: "8,192 chars · up to 256 batch",
+    limitLabel: "8,192 chars · 256 URLs / 5 MiB batch",
     maxFileSizeBytes: FIVE_MIB,
     maxTextLength: URL_MAX_LENGTH,
     maxBatchItems: URL_MAX_BATCH_ITEMS,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: URL_BATCH_TIMEOUT_MS,
+    hasBatchMode: true,
     hasAdvancedOptions: false,
     staticSafetyNote:
-      "Offline lexical & 5-branch neural/tree fusion only. Destinations are never visited or resolved over the network, and all URLs render strictly as non-clickable text.",
+      "Offline URL structure and pattern analysis only — links are never fetched, resolved, or opened.",
   },
   {
     slug: "email",
     name: "Email Scanning",
     shortLabel: "Email",
     category: "Messages",
+    iconKey: "mail",
     summary:
       "Inspect raw .eml messages for phishing, fraud, and malicious links or attachments.",
     route: "/features/email",
@@ -47,12 +69,13 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     inputKind: "file",
     acceptedExtensions: [".eml"],
     formatLabel: ".eml",
-    limitLabel: "Up to 5 MiB",
+    limitLabel: "Up to 5 MiB (.eml)",
     maxFileSizeBytes: FIVE_MIB,
     maxTextLength: null,
     maxBatchItems: null,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: null,
+    hasBatchMode: false,
     hasAdvancedOptions: false,
     staticSafetyNote:
       "Static MIME inspection only. Links are never fetched, attachments are never opened or executed, and submitted messages are not stored after your result is returned.",
@@ -62,19 +85,21 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     name: "SMS Spam & Smishing",
     shortLabel: "SMS",
     category: "Messages",
+    iconKey: "message-square",
     summary:
-      "Analyze single or batch multilingual text messages for smishing links, impersonation, and obfuscation.",
+      "Analyze single or batch multilingual text messages for text-message phishing (smishing) links, impersonation, and obfuscation.",
     route: "/features/sms",
     apiPath: "/api/features/sms",
     inputKind: "text-or-batch",
     acceptedExtensions: [".txt", ".csv", ".json", ".jsonl"],
     formatLabel: "Text or .txt / .csv / .json / .jsonl",
-    limitLabel: "20,000 chars · up to 256 batch",
+    limitLabel: "20,000 chars · 256 messages / 5 MiB batch",
     maxFileSizeBytes: FIVE_MIB,
     maxTextLength: SMS_MAX_TEXT_LENGTH,
     maxBatchItems: SMS_MAX_BATCH_ITEMS,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: SMS_BATCH_TIMEOUT_MS,
+    hasBatchMode: true,
     hasAdvancedOptions: false,
     staticSafetyNote:
       "Offline text analysis only. Extracted URLs, phone numbers, and verification codes are shown strictly as non-clickable plain text and are never retained on the server.",
@@ -84,8 +109,9 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     name: "Office Document Scanning",
     shortLabel: "Office",
     category: "Files & Binaries",
+    iconKey: "file-spreadsheet",
     summary:
-      "Evaluate Microsoft Office and RTF documents statically with separated coverage status and 9-family threat attribution.",
+      "Inspect Office documents and RTF files statically for malicious macros, embedded objects, and suspicious structure.",
     route: "/features/office",
     apiPath: "/api/features/office",
     inputKind: "file",
@@ -101,13 +127,15 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
       ".ppt",
       ".rtf",
     ],
-    formatLabel: ".docx, .docm, .xlsx, .pptx, .doc, .xls, .ppt, .rtf",
+    formatLabel:
+      ".docx, .docm, .xlsx, .xlsm, .pptx, .pptm, .doc, .xls, .ppt, .rtf",
     limitLabel: "Up to 25 MiB",
     maxFileSizeBytes: TWENTY_FIVE_MIB,
     maxTextLength: null,
     maxBatchItems: null,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: null,
+    hasBatchMode: false,
     hasAdvancedOptions: false,
     staticSafetyNote:
       "Static inspection without executing macros or external templates. Encrypted, partial, or unsupported files always surface as review rather than an unqualified clean verdict.",
@@ -117,8 +145,9 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     name: "PDF Document Scanning",
     shortLabel: "PDF",
     category: "Files & Binaries",
+    iconKey: "file-text",
     summary:
-      "Check PDF files for embedded scripts, auto-actions, launch triggers, and hidden payloads with feature explanations.",
+      "Check PDF files statically for embedded scripts, auto-actions, launch triggers, and hidden payloads.",
     route: "/features/pdf",
     apiPath: "/api/features/pdf",
     inputKind: "file",
@@ -130,6 +159,7 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     maxBatchItems: null,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: null,
+    hasBatchMode: false,
     hasAdvancedOptions: true,
     staticSafetyNote:
       "Static structural PDF inspection without rendering scripts or following URIs. Password-protected or unparseable PDFs are flagged with incomplete coverage for review.",
@@ -139,8 +169,9 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     name: "Windows Executable Scanning",
     shortLabel: "Executable",
     category: "Files & Binaries",
+    iconKey: "binary",
     summary:
-      "Inspect Windows PE binaries (.exe, .dll, .sys) statically for malware patterns, packing, and suspicious imports.",
+      "Static Portable Executable (PE) inspection for Windows binaries (.exe, .dll, .sys) checking malware patterns, packing, and suspicious imports.",
     route: "/features/exe",
     apiPath: "/api/features/exe",
     inputKind: "file",
@@ -152,6 +183,7 @@ export const FEATURE_CATALOG: readonly ScanningFeatureDefinition[] = [
     maxBatchItems: null,
     timeoutMs: SINGLE_SCAN_TIMEOUT_MS,
     batchTimeoutMs: null,
+    hasBatchMode: false,
     hasAdvancedOptions: true,
     staticSafetyNote:
       "Static binary inspection only. Uploaded executables and libraries are never executed on the server or in your browser, and raw bytes are discarded immediately after scoring.",

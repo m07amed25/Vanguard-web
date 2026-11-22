@@ -170,11 +170,13 @@ export function mapEmailResponse(
   }
 
   const confidence =
-    riskScore !== null
-      ? verdict === "malicious"
-        ? riskScore
-        : 1 - riskScore
-      : null;
+    verdict === "review" || coverage !== "complete"
+      ? null
+      : riskScore !== null
+        ? verdict === "malicious"
+          ? riskScore
+          : 1 - riskScore
+        : null;
 
   const summary =
     verdict === "malicious"
@@ -322,11 +324,13 @@ export function mapOfficeResponse(
     modalityEntries.length > 0 ? Object.fromEntries(modalityEntries) : null;
 
   const confidence =
-    maliceProb !== null
-      ? verdict === "malicious"
-        ? maliceProb
-        : 1 - maliceProb
-      : null;
+    verdict === "review" || coverage !== "complete"
+      ? null
+      : maliceProb !== null
+        ? verdict === "malicious"
+          ? maliceProb
+          : 1 - maliceProb
+        : null;
 
   const summary =
     verdict === "malicious"
@@ -498,11 +502,15 @@ export function mapPdfResponse(
     coverageLabel: coverageLabelFor(coverage),
     coverageDetail,
     riskTier:
-      normalizeRiskTier(obj.risk_level) !== "UNAVAILABLE"
-        ? normalizeRiskTier(obj.risk_level)
-        : deriveRiskTierFromScore(maliciousProb, verdict),
+      isEncrypted || !parseSuccess
+        ? "UNAVAILABLE"
+        : verdict === "review"
+          ? deriveRiskTierFromScore(maliciousProb, verdict)
+          : normalizeRiskTier(obj.risk_level) !== "UNAVAILABLE"
+            ? normalizeRiskTier(obj.risk_level)
+            : deriveRiskTierFromScore(maliciousProb, verdict),
     riskScore: maliciousProb,
-    confidence,
+    confidence: isEncrypted || !parseSuccess ? null : confidence,
     isUncertain: isUncertain || verdict === "review",
     uncertaintyReasons,
     advisoryNotice: ADVISORY_NOTICE,
@@ -925,12 +933,19 @@ export function mapSmsBatchResponse(
     asNumber(summaryRaw.uncertain_count) ??
     items.filter((i) => i.verdict === "review").length;
 
-  const verdict: AdvisoryVerdict =
-    spamCount > 0 ? "malicious" : uncertainCount > 0 ? "review" : "benign";
+  const hasEmptyResults = items.length === 0;
+  const verdict: AdvisoryVerdict = hasEmptyResults
+    ? "review"
+    : spamCount > 0
+      ? "malicious"
+      : uncertainCount > 0
+        ? "review"
+        : "benign";
 
   const hasTruncated = items.some((i) => i.truncatedMiddle);
-  const coverage: CoverageStatus =
-    uncertainCount > 0 && spamCount === 0
+  const coverage: CoverageStatus = hasEmptyResults
+    ? "unreadable"
+    : uncertainCount > 0 && spamCount === 0
       ? "ambiguous"
       : hasTruncated
         ? "limited"
@@ -1023,13 +1038,13 @@ function mapUrlItem(raw: unknown, index: number): UrlItemOutcome {
   const branchesRaw = asRecord(obj.branches);
   const perfRaw = asRecord(obj.performance);
 
-  const rawStatus = (asString(obj.status) ?? "ok").toLowerCase();
+  const rawStatus = (asString(obj.status) ?? "unavailable").toLowerCase();
   const status: "ok" | "unsupported" | "unavailable" =
-    rawStatus === "unsupported"
-      ? "unsupported"
-      : rawStatus === "unavailable"
-        ? "unavailable"
-        : "ok";
+    rawStatus === "ok"
+      ? "ok"
+      : rawStatus === "unsupported"
+        ? "unsupported"
+        : "unavailable";
 
   const reasonCode = asString(obj.reason_code) ?? "unknown";
   const inputKind = asString(obj.input_kind) ?? "unknown";
@@ -1050,8 +1065,34 @@ function mapUrlItem(raw: unknown, index: number): UrlItemOutcome {
       ? Math.max(0, Math.min(1, 1 - maliciousProbability))
       : null);
 
-  // Strict binary classification: malicious or benign only (any review/uncertain state maps to benign)
-  const verdict: AdvisoryVerdict = isMalicious ? "malicious" : "benign";
+  const rawVerdict = asString(obj.verdict)?.toLowerCase() ?? "";
+  const rawIsUncertain = asBoolean(obj.is_uncertain);
+  const isNonCompleteStatus =
+    status === "unsupported" || status === "unavailable";
+
+  let verdict: AdvisoryVerdict;
+  if (isNonCompleteStatus) {
+    verdict = "review";
+  } else if (isMalicious) {
+    verdict = "malicious";
+  } else if (rawIsUncertain || rawVerdict === "review") {
+    verdict = "review";
+  } else {
+    verdict = "benign";
+  }
+
+  const isUncertain = isNonCompleteStatus || rawIsUncertain || verdict === "review";
+  const rawFactors = asStringArray(verdictDetails.uncertainty_factors);
+  const uncertaintyFactors =
+    rawFactors.length > 0
+      ? rawFactors
+      : status === "unsupported"
+        ? [
+            "URL format or scheme is outside supported HTTP(S) and domain coverage.",
+          ]
+        : status === "unavailable"
+          ? ["URL scoring was unavailable for this item."]
+          : [];
 
   const parsedUrl: UrlParsedComponentSummary | null =
     Object.keys(parsedRaw).length > 0
@@ -1105,9 +1146,9 @@ function mapUrlItem(raw: unknown, index: number): UrlItemOutcome {
     maliciousProbability,
     benignProbability,
     confidence: asNumber(obj.confidence),
-    isUncertain: false,
+    isUncertain,
     predictionEntropy: asNumber(obj.prediction_entropy),
-    uncertaintyFactors: [],
+    uncertaintyFactors,
     policyDecision: asString(obj.policy_decision),
     proposedDecision: asString(obj.proposed_decision),
     thresholdApplied: asNumber(verdictDetails.threshold),
@@ -1126,31 +1167,51 @@ export function mapUrlSingleResponse(raw: unknown): ScanOutcome {
   const perf = asRecord(obj.performance);
   const item = mapUrlItem(obj, 0);
 
-  const coverage: CoverageStatus = "complete";
-  const coverageDetail: string | null = null;
+  let coverage: CoverageStatus = "complete";
+  let coverageDetail: string | null = null;
+  if (item.status === "unsupported") {
+    coverage = "unsupported";
+    coverageDetail =
+      "This link uses an unsupported scheme or format outside HTTP(S) and domain analysis — review manually.";
+  } else if (item.status === "unavailable") {
+    coverage = "unreadable";
+    coverageDetail =
+      "The URL scorer could not complete analysis on this destination — review manually before opening.";
+  } else if (item.isUncertain) {
+    coverage = "ambiguous";
+    coverageDetail =
+      "URL signals fell near the decision boundary — verify the domain and sender before opening.";
+  }
 
   const hostNote = item.parsedUrl?.isIp
-    ? " (raw IP literal host)"
+    ? " (raw IP address host)"
     : item.parsedUrl?.isIdna
-      ? " (IDNA / punycode host)"
+      ? " (international domain encoding / Punycode)"
       : "";
 
   const summary =
     item.verdict === "malicious"
-      ? `Offline 5-branch URL inspection flagged phishing or malware indicators${hostNote}.`
-      : `Offline 5-branch URL inspection found no phishing or malware indicators${hostNote}.`;
+      ? `Static URL inspection flagged phishing or malware indicators${hostNote}.`
+      : item.verdict === "review"
+        ? `Static URL inspection requires human review (${coverageLabelFor(coverage).toLowerCase()})${hostNote}.`
+        : `Static URL inspection found no phishing or malware indicators${hostNote}.`;
 
   const recommendedActions =
     item.verdict === "malicious"
       ? [
           "Do not open this link, sign in, or download files from this destination.",
-          "Inspect the WHATWG host breakdown, 5-branch scores, and lexical features in Technical Evidence below (all rendered safely as non-clickable text).",
+          "Inspect the host and path breakdown and pattern scores in Technical Evidence below (all rendered safely as non-clickable text).",
           "If this link arrived in an email or text message, report the message and navigate to the service directly via a known bookmark.",
         ]
-      : [
-          "No phishing or malware indicators were flagged by static URL analysis.",
-          "Always confirm the domain spelling and HTTPS certificate before entering credentials on unfamiliar pages.",
-        ];
+      : item.verdict === "review"
+        ? [
+            "Do not treat an unsupported, unavailable, or uncertain URL scan as safe.",
+            "Verify the domain spelling and sender independently before visiting this destination.",
+          ]
+        : [
+            "No phishing or malware indicators were flagged by static URL analysis.",
+            "Always confirm the domain spelling and HTTPS certificate before entering credentials on unfamiliar pages.",
+          ];
 
   return {
     status: "completed",
@@ -1167,8 +1228,8 @@ export function mapUrlSingleResponse(raw: unknown): ScanOutcome {
     riskTier: item.riskTier,
     riskScore: item.maliciousProbability,
     confidence: item.confidence,
-    isUncertain: false,
-    uncertaintyReasons: [],
+    isUncertain: item.isUncertain,
+    uncertaintyReasons: item.uncertaintyFactors,
     advisoryNotice: ADVISORY_NOTICE,
     summary,
     recommendedActions,
@@ -1201,20 +1262,38 @@ export function mapUrlBatchResponse(
   const items = resultsRaw.map((entry, idx) => mapUrlItem(entry, idx));
 
   const totalUrls = asNumber(summaryRaw.total_urls) ?? items.length;
-  const scoredCount =
-    asNumber(summaryRaw.scored_count) ??
-    items.filter((i) => i.status === "ok").length;
-  const unsupportedCount =
-    asNumber(summaryRaw.unsupported_count) ??
-    items.filter((i) => i.status === "unsupported").length;
-  const unavailableCount =
-    asNumber(summaryRaw.unavailable_count) ??
-    items.filter((i) => i.status === "unavailable").length;
-  const maliciousCount = items.filter((i) => i.verdict === "malicious").length;
-  const benignCount = items.length - maliciousCount;
+  const scoredItems = items.filter((i) => i.status === "ok");
+  const scoredCount = scoredItems.length;
+  const unsupportedCount = items.filter((i) => i.status === "unsupported").length;
+  const unavailableCount = items.filter((i) => i.status === "unavailable").length;
+  const maliciousCount = scoredItems.filter((i) => i.verdict === "malicious").length;
+  const uncertainCount = scoredItems.filter((i) => i.verdict === "review").length;
+  const benignCount = scoredItems.filter((i) => i.verdict === "benign").length;
+  const reviewTotalCount = uncertainCount + unsupportedCount + unavailableCount;
 
-  const verdict: AdvisoryVerdict = maliciousCount > 0 ? "malicious" : "benign";
-  const coverage: CoverageStatus = "complete";
+  const hasEmptyResults = items.length === 0;
+  const verdict: AdvisoryVerdict = hasEmptyResults
+    ? "review"
+    : maliciousCount > 0
+      ? "malicious"
+      : reviewTotalCount > 0
+        ? "review"
+        : "benign";
+
+  const coverage: CoverageStatus = hasEmptyResults
+    ? "unreadable"
+    : unsupportedCount > 0 || unavailableCount > 0
+      ? "partial"
+      : uncertainCount > 0
+        ? "ambiguous"
+        : "complete";
+
+  const coverageDetail =
+    unsupportedCount + unavailableCount > 0
+      ? `${unsupportedCount + unavailableCount} URL(s) could not be scored completely and require manual review.`
+      : uncertainCount > 0
+        ? `${uncertainCount} URL(s) scored inside the uncertainty band and should be reviewed manually.`
+        : null;
 
   const maxMaliciousProb = items.reduce<number | null>((acc, item) => {
     if (item.maliciousProbability === null) return acc;
@@ -1225,8 +1304,10 @@ export function mapUrlBatchResponse(
 
   const summary =
     maliciousCount > 0
-      ? `Flagged ${maliciousCount} of ${totalUrls} URLs for phishing or malware (${benignCount} benign).`
-      : `All ${totalUrls} URLs in this batch were classified as benign.`;
+      ? `Flagged ${maliciousCount} of ${totalUrls} URLs for phishing or malware (${reviewTotalCount} need review, ${benignCount} benign).`
+      : reviewTotalCount > 0
+        ? `No confirmed malicious URLs, but ${reviewTotalCount} of ${totalUrls} URLs need human review (${benignCount} benign).`
+        : `All ${totalUrls} URLs in this batch showed no phishing or malware indicators.`;
 
   const firstItemRaw = resultsRaw[0] ? asRecord(resultsRaw[0]) : {};
   const firstVerdictDetails = asRecord(firstItemRaw.verdict_details);
@@ -1242,26 +1323,35 @@ export function mapUrlBatchResponse(
     verdictLabel:
       verdict === "malicious"
         ? `${maliciousCount} flagged in batch`
-        : "Batch clean",
+        : verdict === "review"
+          ? `${reviewTotalCount} need review`
+          : "Batch clean",
     coverage,
     coverageLabel: coverageLabelFor(coverage),
-    coverageDetail: null,
+    coverageDetail,
     riskTier: deriveRiskTierFromScore(maxMaliciousProb, verdict),
     riskScore: maxMaliciousProb,
     confidence: null,
-    isUncertain: false,
-    uncertaintyReasons: [],
+    isUncertain: reviewTotalCount > 0,
+    uncertaintyReasons:
+      reviewTotalCount > 0
+        ? [`${reviewTotalCount} of ${totalUrls} URLs require manual review.`]
+        : [],
     advisoryNotice: ADVISORY_NOTICE,
     summary,
     recommendedActions:
       maliciousCount > 0
         ? [
-            "Review each flagged URL and its WHATWG host breakdown in the batch ledger below before opening any link.",
+            "Review each flagged URL and its host and path breakdown in Technical Evidence below before opening any link.",
             "Download the JSON summary report to archive or share inert indicators with your security team.",
           ]
-        : [
-            "No phishing or malware indicators were flagged across the submitted URLs.",
-          ],
+        : reviewTotalCount > 0
+          ? [
+              "Inspect the items marked for review in Technical Evidence below and verify unfamiliar domains independently.",
+            ]
+          : [
+              "No phishing or malware indicators were flagged across the submitted URLs.",
+            ],
     latencyMs: asNumber(summaryRaw.total_latency_ms),
     details: {
       kind: "url",
@@ -1283,7 +1373,7 @@ export function mapUrlBatchResponse(
         unavailableCount,
         maliciousCount,
         benignCount,
-        uncertainCount: 0,
+        uncertainCount,
         averageLatencyMs: asNumber(summaryRaw.average_latency_ms),
       },
       items,

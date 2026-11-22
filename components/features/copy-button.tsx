@@ -54,18 +54,18 @@ export function CopyButton({
         type="button"
         onClick={() => void handleCopy()}
         aria-label={copied ? `${ariaLabel} (copied)` : ariaLabel}
-        className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-border-control bg-surface px-3.5 text-sm font-semibold text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected"
+        className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected"
       >
         {copied ? (
           <Check
             aria-hidden="true"
-            className="size-4 shrink-0 text-positive"
+            className="size-3.5 shrink-0 text-positive"
             strokeWidth={1.75}
           />
         ) : (
           <Copy
             aria-hidden="true"
-            className="size-4 shrink-0"
+            className="size-3.5 shrink-0"
             strokeWidth={1.75}
           />
         )}
@@ -85,18 +85,18 @@ export function CopyButton({
       {copied ? (
         <Check
           aria-hidden="true"
-          className="size-4 shrink-0 text-positive"
+          className="size-3.5 shrink-0 text-positive"
           strokeWidth={1.75}
         />
       ) : (
         <Copy
           aria-hidden="true"
-          className="size-4 shrink-0"
+          className="size-3.5 shrink-0"
           strokeWidth={1.75}
         />
       )}
       {label && (
-        <span className="ms-1.5 pr-1 text-xs font-semibold">
+        <span className="ms-1 pr-1 text-xs font-medium">
           {copied ? copiedLabel : label}
         </span>
       )}

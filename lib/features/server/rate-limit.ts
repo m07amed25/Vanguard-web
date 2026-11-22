@@ -91,3 +91,9 @@ export const scanRateLimiter = createSlidingWindowRateLimiter({
   windowMs: DEFAULT_WINDOW_MS,
   maxKeys: DEFAULT_MAX_KEYS,
 });
+
+export const healthRateLimiter = createSlidingWindowRateLimiter({
+  maxRequests: 12,
+  windowMs: DEFAULT_WINDOW_MS,
+  maxKeys: DEFAULT_MAX_KEYS,
+});

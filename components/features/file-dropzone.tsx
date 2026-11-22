@@ -1,29 +1,37 @@
 "use client";
 
-import { FileUp, Paperclip, X } from "lucide-react";
-import { useId, useRef, useState, type DragEvent } from "react";
+import { Loader2, Paperclip, Upload, X } from "lucide-react";
+import { useId, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { formatBytes } from "@/lib/features/catalog";
+import { CopyButton } from "./copy-button";
 
 interface FileDropzoneProps {
   label: string;
-  acceptedExtensions: readonly string[];
   formatLabel: string;
   limitLabel: string;
+  acceptedExtensions: readonly string[];
   file: File | null;
   disabled?: boolean;
+  submitting?: boolean;
   error?: string | null;
   onFileSelect: (file: File | null) => void;
+  submitLabel?: string;
+  submitId?: string;
+  emptyPrompt?: ReactNode;
 }
 
 export function FileDropzone({
   label,
-  acceptedExtensions,
   formatLabel,
   limitLabel,
   file,
   disabled = false,
+  submitting = false,
   error,
   onFileSelect,
+  submitLabel = "Scan file",
+  submitId,
+  emptyPrompt = "Drop a file here, or choose one from your device.",
 }: FileDropzoneProps) {
   const inputId = useId();
   const helpId = `${inputId}-help`;
@@ -65,125 +73,128 @@ export function FileDropzone({
   }
 
   return (
-    <div className="grid gap-2">
-      <label htmlFor={inputId} className="text-sm font-semibold text-foreground">
-        {label} <span className="text-danger" aria-hidden="true">*</span>
-        <span className="sr-only"> (required)</span>
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`divide-y divide-outline motion-safe:transition-colors motion-safe:duration-150 ${
+        dragging ? "bg-surface-selected/40" : ""
+      }`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 py-3 text-xs sm:px-6">
+        <span className="font-medium text-foreground">{label}</span>
+        <span className="text-muted-foreground">
+          <span className="font-mono">{formatLabel}</span>
+          <span aria-hidden="true" className="mx-1.5 text-border-control">
+            ·
+          </span>
+          <span className="tabular-nums">{limitLabel}</span>
+        </span>
+      </div>
+
+      <label htmlFor={inputId} className="sr-only">
+        {label}
       </label>
+      <input
+        ref={inputRef}
+        id={inputId}
+        type="file"
+        tabIndex={-1}
+        aria-hidden="true"
+        disabled={disabled}
+        className="sr-only"
+        onChange={(event) => {
+          const chosen = event.currentTarget.files?.[0] ?? null;
+          event.currentTarget.value = "";
+          onFileSelect(chosen);
+        }}
+      />
 
-      <div
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={`rounded-xl border border-dashed px-4 py-4 motion-safe:transition-colors motion-safe:duration-150 sm:px-5 ${
-          error
-            ? "border-danger bg-danger-bg/25"
-            : dragging
-              ? "border-accent bg-surface-selected/50"
-              : "border-border-control bg-canvas hover:border-accent/60 hover:bg-surface-raised/60"
-        } ${disabled ? "opacity-65" : ""}`}
-      >
-        <input
-          ref={inputRef}
-          id={inputId}
-          type="file"
-          accept={acceptedExtensions.join(",")}
-          disabled={disabled}
-          aria-invalid={error ? true : undefined}
-          aria-describedby={error ? `${helpId} ${errorId}` : helpId}
-          className="sr-only"
-          onChange={(event) => {
-            const chosen = event.currentTarget.files?.[0] ?? null;
-            onFileSelect(chosen);
-          }}
-        />
-
-        {file ? (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
+      <div className="flex flex-col gap-3 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="min-w-0 flex-1">
+          {file ? (
+            <div className="flex min-w-0 items-center gap-2 text-sm">
               <Paperclip
                 aria-hidden="true"
                 className="size-4 shrink-0 text-accent"
                 strokeWidth={1.75}
               />
-              <div className="min-w-0">
-                <p
-                  className="truncate font-mono text-sm text-foreground"
-                  title={file.name}
-                >
-                  {file.name}
-                </p>
-                <p className="text-xs text-muted-foreground tabular-nums">
-                  {formatBytes(file.size)} · Ready to inspect statically
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={openPicker}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-xl border border-border-control bg-surface px-3.5 text-sm font-semibold text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover disabled:cursor-default disabled:opacity-50"
+              <span
+                className="truncate font-mono text-sm text-foreground"
+                title={file.name}
               >
-                Replace file
-              </button>
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={clearFile}
-                aria-label="Remove selected file"
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-outline bg-surface text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:border-border-control hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                {file.name}
+              </span>
+              <span
+                id={helpId}
+                className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums"
               >
-                <X aria-hidden="true" className="size-4" strokeWidth={1.75} />
-              </button>
+                · {formatBytes(file.size)}
+              </span>
+              <CopyButton
+                value={file.name}
+                ariaLabel="Copy selected filename"
+              />
             </div>
-          </div>
-        ) : (
-          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-start gap-3">
-              <FileUp
+          ) : (
+            <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+              <Upload
                 aria-hidden="true"
-                className="mt-0.5 size-5 shrink-0 text-accent"
+                className="size-4 shrink-0 text-muted-foreground"
                 strokeWidth={1.75}
               />
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-foreground">
-                  Drop a file here, or choose one from your device
-                </p>
-                <p id={helpId} className="text-xs text-muted-foreground">
-                  Accepted:{" "}
-                  <span className="font-mono text-foreground/90">
-                    {formatLabel}
-                  </span>{" "}
-                  · <span>{limitLabel}</span>
-                </p>
-              </div>
+              <p id={helpId}>{emptyPrompt}</p>
             </div>
+          )}
+        </div>
 
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={disabled}
+            aria-describedby={error ? `${helpId} ${errorId}` : helpId}
+            onClick={openPicker}
+            className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+          >
+            {file ? "Change file" : "Choose file"}
+          </button>
+
+          {file && (
             <button
               type="button"
               disabled={disabled}
-              onClick={openPicker}
-              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-border-control bg-surface px-4 text-sm font-semibold text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+              onClick={clearFile}
+              aria-label="Remove selected file"
+              className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg border border-border-control bg-canvas text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
             >
-              Choose file
+              <X aria-hidden="true" className="size-4" strokeWidth={1.75} />
             </button>
-          </div>
-        )}
+          )}
+
+          <button
+            id={submitId}
+            type="submit"
+            disabled={disabled}
+            className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
+          >
+            {submitting && (
+              <Loader2
+                aria-hidden="true"
+                className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
+                strokeWidth={1.75}
+              />
+            )}
+            <span>{submitLabel}</span>
+          </button>
+        </div>
       </div>
 
-      {file && (
-        <p id={helpId} className="text-xs text-muted-foreground">
-          Accepted: <span className="font-mono">{formatLabel}</span> ·{" "}
-          {limitLabel}. Actual file contents are verified before scanning.
-        </p>
-      )}
-
       {error && (
-        <p id={errorId} role="alert" className="text-sm font-medium text-danger">
-          {error}
-        </p>
+        <div className="bg-danger-bg/20 px-4 py-2.5 sm:px-5">
+          <p id={errorId} role="alert" className="text-xs font-medium text-danger break-words">
+            {error}
+          </p>
+        </div>
       )}
     </div>
   );

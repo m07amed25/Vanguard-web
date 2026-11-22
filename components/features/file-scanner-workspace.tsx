@@ -1,29 +1,36 @@
 "use client";
 
-import { AlertCircle, RefreshCw, ShieldCheck } from "lucide-react";
-import { useId, useRef, useState, type FormEvent } from "react";
-import { getFeatureDefinition } from "@/lib/features/catalog";
+import { AlertCircle, RefreshCw } from "lucide-react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { formatBytes, getFeatureDefinition } from "@/lib/features/catalog";
+import { inspectBrowserFileSignature } from "@/lib/features/file-signature";
 import type {
   ExecutionState,
-  FeatureSlug,
+  FileScannerSlug,
+  PendingTriageHandoff,
   ScanApiResponse,
   ScanErrorResponse,
   ScanOutcome,
 } from "@/lib/features/types";
 import { AdvancedOptionsPanel } from "./advanced-options-panel";
+import { CopyButton } from "./copy-button";
 import { FileDropzone } from "./file-dropzone";
 import { ScanResultPanel } from "./scan-result-panel";
-
-type FileFeatureSlug = Exclude<FeatureSlug, "sms">;
+import { useTriageHandoff } from "./workspace-provider";
 
 interface FileScannerWorkspaceProps {
-  slug: FileFeatureSlug;
+  slug: FileScannerSlug;
 }
 
 export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
   const feature = getFeatureDefinition(slug);
+  const { claimHandoff } = useTriageHandoff();
   const baseId = useId();
   const submittingRef = useRef(false);
+  const selectionSeqRef = useRef(0);
+  const scanSeqRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const handledHandoffIdRef = useRef<string | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
   const [execState, setExecState] = useState<ExecutionState>("idle");
@@ -52,36 +59,56 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
   const [pdfDeepInspection, setPdfDeepInspection] = useState(true);
   const [pdfIncludeFeatures, setPdfIncludeFeatures] = useState(false);
 
-  async function runScan() {
-    if (submittingRef.current) return;
+  async function handleFileSelect(next: File | null) {
+    const seq = ++selectionSeqRef.current;
+    setFile(next);
+    setErrorResponse(null);
 
+    if (!next) {
+      setFieldErrors((prev) => ({ ...prev, file: "" }));
+      setLiveStatus("Removed selected file.");
+      return;
+    }
+
+    setFieldErrors((prev) => ({ ...prev, file: "" }));
+    const signature = await inspectBrowserFileSignature(next, slug);
+    if (seq !== selectionSeqRef.current) return;
+
+    if (!signature.ok) {
+      setFieldErrors((prev) => ({ ...prev, file: signature.message }));
+      setLiveStatus(signature.message);
+      return;
+    }
+
+    setLiveStatus(`Selected ${next.name} (${formatBytes(next.size)}).`);
+  }
+
+  async function runScan(overrideFile?: File, supersede = false) {
+    if (submittingRef.current && !supersede) return;
+
+    const targetFile = overrideFile ?? file;
     const nextErrors: Record<string, string> = {};
-    if (!file) {
+    if (!targetFile) {
       nextErrors.file = `Select a file (${feature.formatLabel}) to inspect.`;
-    } else if (file.size === 0) {
-      nextErrors.file = "The selected file is empty (0 bytes). Choose a non-empty file.";
-    } else if (
-      feature.maxFileSizeBytes !== null &&
-      file.size > feature.maxFileSizeBytes
-    ) {
-      nextErrors.file = `This file exceeds the ${feature.limitLabel} upload limit.`;
     }
 
     if (slug === "exe" && exeThreshold.trim() !== "") {
       const parsed = Number(exeThreshold.trim());
       if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-        nextErrors.threshold = "Custom threshold must be a number between 0 and 1.";
+        nextErrors.threshold =
+          "Sensitivity threshold must be a number between 0 and 1.";
       }
     }
 
     if (slug === "pdf" && pdfThreshold.trim() !== "") {
       const parsed = Number(pdfThreshold.trim());
       if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-        nextErrors.threshold = "Custom threshold must be a number between 0 and 1.";
+        nextErrors.threshold =
+          "Sensitivity threshold must be a number between 0 and 1.";
       }
     }
 
-    if (Object.keys(nextErrors).length > 0) {
+    if (Object.keys(nextErrors).length > 0 || !targetFile) {
       setFieldErrors(nextErrors);
       setErrorResponse(null);
       setExecState("idle");
@@ -89,16 +116,32 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
       return;
     }
 
-    if (!file) return;
+    if (supersede) {
+      abortControllerRef.current?.abort();
+    }
+    const seq = ++scanSeqRef.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     submittingRef.current = true;
     setFieldErrors({});
     setErrorResponse(null);
     setExecState("submitting");
-    setLiveStatus(`Validating and scanning ${file.name} statically. Please wait...`);
+    setLiveStatus(`Validating and scanning ${targetFile.name} statically. Please wait...`);
+
+    const signature = await inspectBrowserFileSignature(targetFile, slug);
+    if (seq !== scanSeqRef.current) return;
+    if (!signature.ok) {
+      submittingRef.current = false;
+      setFieldErrors({ file: signature.message });
+      setErrorResponse(null);
+      setExecState("idle");
+      setLiveStatus(signature.message);
+      return;
+    }
 
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("file", targetFile);
 
     if (slug === "exe") {
       formData.append("operatingPoint", operatingPoint);
@@ -120,9 +163,12 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
       const response = await fetch(feature.apiPath, {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
+      if (seq !== scanSeqRef.current) return;
 
       const data = (await response.json()) as ScanApiResponse;
+      if (seq !== scanSeqRef.current) return;
       if (!response.ok || data.status === "failed") {
         const err: ScanErrorResponse =
           data.status === "failed"
@@ -145,6 +191,7 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
       setExecState("completed");
       setLiveStatus(`Scan completed: ${data.verdictLabel}.`);
     } catch {
+      if (seq !== scanSeqRef.current) return;
       const networkErr: ScanErrorResponse = {
         status: "failed",
         code: "service_unavailable",
@@ -157,9 +204,46 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
       setExecState("failed");
       setLiveStatus(networkErr.message);
     } finally {
-      submittingRef.current = false;
+      if (seq === scanSeqRef.current) {
+        submittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   }
+
+  function runScanWithHandoff(handoff: PendingTriageHandoff) {
+    if (handoff.kind !== "file" || handoff.slug !== slug) return;
+    selectionSeqRef.current += 1;
+    abortControllerRef.current?.abort();
+    submittingRef.current = false;
+    setOutcome(null);
+    setErrorResponse(null);
+    setFieldErrors({});
+    setExecState("idle");
+    setFile(handoff.file);
+    if (handoff.autoSubmit) {
+      void runScan(handoff.file, true);
+    }
+  }
+
+  const runScanWithHandoffRef = useRef(runScanWithHandoff);
+  useEffect(() => {
+    runScanWithHandoffRef.current = runScanWithHandoff;
+  });
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      const pending = claimHandoff(slug);
+      if (!pending || pending.id === handledHandoffIdRef.current) return;
+      handledHandoffIdRef.current = pending.id;
+      runScanWithHandoffRef.current(pending);
+    });
+    return () => {
+      active = false;
+    };
+  }, [claimHandoff, slug]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -167,6 +251,7 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
   }
 
   function handleReset() {
+    selectionSeqRef.current += 1;
     setFile(null);
     setOutcome(null);
     setErrorResponse(null);
@@ -176,6 +261,7 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
   }
 
   const isSubmitting = execState === "submitting";
+  const hasFieldError = Boolean(fieldErrors.file || fieldErrors.threshold);
 
   return (
     <div className="space-y-6">
@@ -186,32 +272,38 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
       <form
         onSubmit={handleSubmit}
         noValidate
-        className="workspace-panel space-y-5 rounded-xl border border-outline bg-surface p-5 sm:p-6"
+        className={`workspace-panel divide-y divide-outline overflow-hidden rounded-2xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
+          hasFieldError ? "border-danger" : "border-outline"
+        }`}
       >
         <FileDropzone
           label={`File to inspect (${feature.shortLabel})`}
-          acceptedExtensions={feature.acceptedExtensions}
           formatLabel={feature.formatLabel}
           limitLabel={feature.limitLabel}
+          acceptedExtensions={feature.acceptedExtensions}
           file={file}
           disabled={isSubmitting}
+          submitting={isSubmitting}
           error={fieldErrors.file}
+          submitLabel={
+            isSubmitting
+              ? "Scanning..."
+              : `Scan ${feature.shortLabel.toLowerCase()}`
+          }
           onFileSelect={(next) => {
-            setFile(next);
-            setFieldErrors((prev) => ({ ...prev, file: "" }));
-            setErrorResponse(null);
+            void handleFileSelect(next);
           }}
         />
 
         {slug === "exe" && (
-          <AdvancedOptionsPanel summary="Tune false-alarm operating point, custom threshold, model mode, or deep static PE inspection">
+          <AdvancedOptionsPanel>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <label
                   htmlFor={`${baseId}-op`}
-                  className="text-sm font-semibold text-foreground"
+                  className="text-xs font-medium text-muted-foreground"
                 >
-                  Sensitivity profile
+                  Alert sensitivity profile
                 </label>
                 <select
                   id={`${baseId}-op`}
@@ -222,19 +314,19 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                       e.currentTarget.value as "fpr_1pct" | "fpr_0.1pct",
                     )
                   }
-                  className="min-h-11 rounded-xl border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
+                  className="min-h-11 rounded-lg border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
                 >
-                  <option value="fpr_1pct">Balanced (1% target false-alarm rate)</option>
-                  <option value="fpr_0.1pct">Strict (0.1% target false-alarm rate)</option>
+                  <option value="fpr_1pct">Balanced (fewer missed threats)</option>
+                  <option value="fpr_0.1pct">Strict (fewer false alarms)</option>
                 </select>
               </div>
 
               <div className="grid gap-1.5">
                 <label
                   htmlFor={`${baseId}-model`}
-                  className="text-sm font-semibold text-foreground"
+                  className="text-xs font-medium text-muted-foreground"
                 >
-                  Analysis mode
+                  Inspection strategy
                 </label>
                 <select
                   id={`${baseId}-model`}
@@ -245,20 +337,22 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                       e.currentTarget.value as "both" | "hybrid" | "gbdt",
                     )
                   }
-                  className="min-h-11 rounded-xl border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
+                  className="min-h-11 rounded-lg border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
                 >
-                  <option value="both">Combined ensemble (recommended)</option>
-                  <option value="hybrid">Deep binary pattern analysis</option>
-                  <option value="gbdt">Structural attribute analysis</option>
+                  <option value="both">
+                    Balanced multi-model scan (recommended)
+                  </option>
+                  <option value="hybrid">Byte-sequence pattern scan</option>
+                  <option value="gbdt">Fast structural analysis</option>
                 </select>
               </div>
 
               <div className="grid gap-1.5">
                 <label
                   htmlFor={`${baseId}-exe-threshold`}
-                  className="text-sm font-semibold text-foreground"
+                  className="text-xs font-medium text-muted-foreground"
                 >
-                  Custom threshold (0–1, optional)
+                  Sensitivity threshold (0–1)
                 </label>
                 <input
                   id={`${baseId}-exe-threshold`}
@@ -271,16 +365,23 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                   disabled={isSubmitting}
                   placeholder="Profile default"
                   aria-invalid={fieldErrors.threshold ? true : undefined}
+                  aria-describedby={`${baseId}-exe-threshold-help`}
                   onChange={(e) => {
                     setExeThreshold(e.currentTarget.value);
                     if (fieldErrors.threshold) {
                       setFieldErrors((prev) => ({ ...prev, threshold: "" }));
                     }
                   }}
-                  className={`min-h-11 rounded-xl border bg-canvas px-3.5 font-mono text-sm text-foreground placeholder:font-sans placeholder:text-muted-foreground/80 focus:border-accent disabled:opacity-60 ${
+                  className={`min-h-11 rounded-lg border bg-canvas px-3 font-mono text-sm text-foreground placeholder:font-sans placeholder:text-muted-foreground/80 focus:border-accent disabled:opacity-60 ${
                     fieldErrors.threshold ? "border-danger" : "border-border-control"
                   }`}
                 />
+                <p
+                  id={`${baseId}-exe-threshold-help`}
+                  className="text-xs text-muted-foreground"
+                >
+                  Detection sensitivity threshold from 0 to 1 (lower values flag more borderline files; default 0.50).
+                </p>
                 {fieldErrors.threshold && (
                   <p role="alert" className="text-xs font-medium text-danger">
                     {fieldErrors.threshold}
@@ -288,22 +389,22 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                 )}
               </div>
 
-              <div className="flex items-start gap-3 pt-1 sm:pt-7">
+              <div className="flex min-h-11 items-start gap-2.5 pt-1 sm:pt-6">
                 <input
                   id={`${baseId}-exe-deep`}
                   type="checkbox"
                   checked={exeDeepInspection}
                   disabled={isSubmitting}
                   onChange={(e) => setExeDeepInspection(e.currentTarget.checked)}
-                  className="mt-1 size-5 cursor-pointer accent-primary"
+                  className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
                 />
                 <label
                   htmlFor={`${baseId}-exe-deep`}
                   className="cursor-pointer text-sm text-foreground"
                 >
-                  <span className="block font-semibold">Deep static PE inspection</span>
-                  <span className="block text-xs text-muted-foreground">
-                    Include Authenticode status, section entropy, W+X checks, and API flags.
+                  Extended static binary inspection
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Inspect file headers, section layout, and digital signature metadata without executing code.
                   </span>
                 </label>
               </div>
@@ -312,14 +413,14 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
         )}
 
         {slug === "pdf" && (
-          <AdvancedOptionsPanel summary="Tune risk threshold, evaluation classifier, deep static inspection, or raw feature telemetry">
+          <AdvancedOptionsPanel>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <label
                   htmlFor={`${baseId}-pdf-threshold`}
-                  className="text-sm font-semibold text-foreground"
+                  className="text-xs font-medium text-muted-foreground"
                 >
-                  Decision threshold (0–1)
+                  Sensitivity threshold (0–1)
                 </label>
                 <input
                   id={`${baseId}-pdf-threshold`}
@@ -331,16 +432,23 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                   value={pdfThreshold}
                   disabled={isSubmitting}
                   aria-invalid={fieldErrors.threshold ? true : undefined}
+                  aria-describedby={`${baseId}-pdf-threshold-help`}
                   onChange={(e) => {
                     setPdfThreshold(e.currentTarget.value);
                     if (fieldErrors.threshold) {
                       setFieldErrors((prev) => ({ ...prev, threshold: "" }));
                     }
                   }}
-                  className={`min-h-11 rounded-xl border bg-canvas px-3.5 font-mono text-sm text-foreground focus:border-accent disabled:opacity-60 ${
+                  className={`min-h-11 rounded-lg border bg-canvas px-3 font-mono text-sm text-foreground focus:border-accent disabled:opacity-60 ${
                     fieldErrors.threshold ? "border-danger" : "border-border-control"
                   }`}
                 />
+                <p
+                  id={`${baseId}-pdf-threshold-help`}
+                  className="text-xs text-muted-foreground"
+                >
+                  Detection sensitivity threshold from 0 to 1 (lower values flag more borderline files; default 0.50).
+                </p>
                 {fieldErrors.threshold && (
                   <p role="alert" className="text-xs font-medium text-danger">
                     {fieldErrors.threshold}
@@ -351,9 +459,9 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
               <div className="grid gap-1.5">
                 <label
                   htmlFor={`${baseId}-pdf-est`}
-                  className="text-sm font-semibold text-foreground"
+                  className="text-xs font-medium text-muted-foreground"
                 >
-                  Evaluation mode
+                  Inspection strategy
                 </label>
                 <select
                   id={`${baseId}-pdf-est`}
@@ -369,52 +477,54 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                         | "lgbm",
                     )
                   }
-                  className="min-h-11 rounded-xl border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
+                  className="min-h-11 rounded-lg border border-border-control bg-canvas px-3 text-sm text-foreground focus:border-accent disabled:opacity-60"
                 >
-                  <option value="ensemble">Combined ensemble (recommended)</option>
-                  <option value="lgbm">Gradient boosted trees (LightGBM)</option>
-                  <option value="rf">Random Forest</option>
-                  <option value="et">Extra Trees</option>
-                  <option value="lr">Logistic Regression</option>
+                  <option value="ensemble">
+                    Balanced multi-model scan (recommended)
+                  </option>
+                  <option value="lgbm">Fast structural analysis</option>
+                  <option value="rf">Broad tree consensus</option>
+                  <option value="et">Fine-grained structure patterns</option>
+                  <option value="lr">Lightweight linear baseline</option>
                 </select>
               </div>
 
-              <div className="flex items-start gap-3">
+              <div className="flex min-h-11 items-start gap-2.5">
                 <input
                   id={`${baseId}-pdf-deep`}
                   type="checkbox"
                   checked={pdfDeepInspection}
                   disabled={isSubmitting}
                   onChange={(e) => setPdfDeepInspection(e.currentTarget.checked)}
-                  className="mt-1 size-5 cursor-pointer accent-primary"
+                  className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
                 />
                 <label
                   htmlFor={`${baseId}-pdf-deep`}
                   className="cursor-pointer text-sm text-foreground"
                 >
-                  <span className="block font-semibold">Deep static PDF inspection</span>
-                  <span className="block text-xs text-muted-foreground">
-                    Extract document metadata, active-content counts, and inert URLs.
+                  Extended static PDF inspection
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Inspect embedded scripts, launch actions, and document metadata statically.
                   </span>
                 </label>
               </div>
 
-              <div className="flex items-start gap-3">
+              <div className="flex min-h-11 items-start gap-2.5">
                 <input
                   id={`${baseId}-pdf-features`}
                   type="checkbox"
                   checked={pdfIncludeFeatures}
                   disabled={isSubmitting}
                   onChange={(e) => setPdfIncludeFeatures(e.currentTarget.checked)}
-                  className="mt-1 size-5 cursor-pointer accent-primary"
+                  className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
                 />
                 <label
                   htmlFor={`${baseId}-pdf-features`}
                   className="cursor-pointer text-sm text-foreground"
                 >
-                  <span className="block font-semibold">Include full static feature vector</span>
-                  <span className="block text-xs text-muted-foreground">
-                    Append all 131 extracted numeric features in Technical Evidence.
+                  Include raw inspection metrics
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Attach detailed numerical measurements inside Technical Evidence.
                   </span>
                 </label>
               </div>
@@ -422,23 +532,36 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
           </AdvancedOptionsPanel>
         )}
 
+        {isSubmitting && (
+          <div
+            aria-busy="true"
+            className="px-4 py-2.5 text-xs text-muted-foreground sm:px-5"
+          >
+            Inspecting {feature.shortLabel.toLowerCase()} structure statically without executing the file...
+          </div>
+        )}
+
         {errorResponse && (
           <div
             role="alert"
-            className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-danger/40 bg-danger-bg/35 px-4 py-3 text-sm"
+            className="flex flex-wrap items-center justify-between gap-3 bg-danger-bg/20 px-4 py-2.5 text-xs sm:px-5"
           >
-            <div className="flex min-w-0 items-start gap-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AlertCircle
                 aria-hidden="true"
-                className="mt-0.5 size-4 shrink-0 text-danger"
+                className="size-3.5 shrink-0 text-danger"
                 strokeWidth={1.75}
               />
-              <div className="min-w-0 space-y-1">
-                <p className="font-semibold text-foreground">{errorResponse.message}</p>
-                <p className="font-mono text-xs text-muted-foreground">
-                  Reference: {errorResponse.diagnosticId}
-                </p>
-              </div>
+              <span className="font-medium text-foreground break-words">
+                {errorResponse.message}
+              </span>
+              <span className="font-mono text-muted-foreground">
+                · {errorResponse.diagnosticId}
+              </span>
+              <CopyButton
+                value={errorResponse.diagnosticId}
+                ariaLabel="Copy diagnostic reference ID"
+              />
             </div>
 
             {errorResponse.retryable && (
@@ -446,46 +569,15 @@ export function FileScannerWorkspace({ slug }: FileScannerWorkspaceProps) {
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => void runScan()}
-                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-xl border border-border-control bg-surface px-3.5 text-xs font-semibold text-foreground hover:bg-surface-hover"
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-hover active:bg-surface-selected"
               >
                 <RefreshCw aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
-                <span>Try again</span>
+                <span>Retry</span>
               </button>
             )}
           </div>
         )}
-
-        <div className="flex flex-wrap items-center justify-end gap-3 border-t border-outline pt-4">
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
-          >
-            <ShieldCheck aria-hidden="true" className="size-4" strokeWidth={1.75} />
-            <span>
-              {isSubmitting
-                ? `Inspecting ${feature.shortLabel.toLowerCase()}...`
-                : `Start ${feature.shortLabel.toLowerCase()} scan`}
-            </span>
-          </button>
-        </div>
       </form>
-
-      {isSubmitting && (
-        <div
-          aria-busy="true"
-          className="workspace-panel space-y-3 rounded-xl border border-info/35 bg-info-bg/25 p-5"
-        >
-          <p className="text-sm font-semibold text-info">
-            Running static inspection without executing the uploaded file...
-          </p>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <div className="h-3 rounded bg-surface-hover motion-safe:animate-pulse" />
-            <div className="h-3 rounded bg-surface-hover motion-safe:animate-pulse" />
-            <div className="h-3 rounded bg-surface-hover motion-safe:animate-pulse" />
-          </div>
-        </div>
-      )}
 
       {outcome && !isSubmitting && (
         <ScanResultPanel outcome={outcome} onReset={handleReset} />

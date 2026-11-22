@@ -5,7 +5,7 @@ import type {
   ScanOutcome,
 } from "../types.ts";
 import { GatewayError } from "./gateway-client.ts";
-import { scanRateLimiter } from "./rate-limit.ts";
+import { healthRateLimiter, scanRateLimiter } from "./rate-limit.ts";
 
 const PRIVATE_NO_STORE_HEADERS = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -66,16 +66,55 @@ export function scanErrorResponse(options: {
   });
 }
 
+function normalizeVisitorHeaderValue(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim().slice(0, 128);
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export function resolveVisitorKey(request: Request): string {
+  const pinnedHeader = process.env.TRUSTED_PROXY_HEADER?.trim().toLowerCase();
+  if (pinnedHeader) {
+    const pinnedRaw = request.headers.get(pinnedHeader);
+    if (pinnedRaw) {
+      const parts = pinnedRaw
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const candidate = normalizeVisitorHeaderValue(parts[parts.length - 1]);
+      if (candidate) return candidate;
+    }
+    return "local-visitor";
+  }
+
+  const vercelForwarded = request.headers.get("x-vercel-forwarded-for");
+  if (vercelForwarded) {
+    const parts = vercelForwarded
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const candidate = normalizeVisitorHeaderValue(parts[parts.length - 1]);
+    if (candidate) return candidate;
+  }
+
+  const cfIp = normalizeVisitorHeaderValue(
+    request.headers.get("cf-connecting-ip"),
+  );
+  if (cfIp) return cfIp;
+
   const xff = request.headers.get("x-forwarded-for");
   if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = xff
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const rightmost = normalizeVisitorHeaderValue(parts[parts.length - 1]);
+    if (rightmost) return rightmost;
   }
-  const realIp = request.headers.get("x-real-ip")?.trim();
+
+  const realIp = normalizeVisitorHeaderValue(request.headers.get("x-real-ip"));
   if (realIp) return realIp;
-  const cfIp = request.headers.get("cf-connecting-ip")?.trim();
-  if (cfIp) return cfIp;
+
   return "local-visitor";
 }
 
@@ -88,6 +127,21 @@ export function enforceScanRateLimit(request: Request): Response | null {
     status: 429,
     code: "rate_limited",
     message: `You have reached the temporary scan limit (20 scans per minute). Please wait ${decision.retryAfterSeconds} seconds and try again.`,
+    retryable: true,
+    retryAfterSeconds: decision.retryAfterSeconds,
+  });
+}
+
+export function enforceHealthRateLimit(request: Request): Response | null {
+  const visitorKey = resolveVisitorKey(request);
+  const decision = healthRateLimiter.consume(visitorKey);
+  if (decision.allowed) return null;
+
+  return scanErrorResponse({
+    status: 429,
+    code: "rate_limited",
+    message:
+      "Too many health status checks. Wait a moment and try again (limit: 12 per minute).",
     retryable: true,
     retryAfterSeconds: decision.retryAfterSeconds,
   });
@@ -119,5 +173,14 @@ export function sanitizeDisplayFilename(
   if (!rawName) return fallback;
   const base = rawName.split(/[\\/]/).pop() ?? fallback;
   const cleaned = base.replace(/[\u0000-\u001f\u007f]/g, "").trim();
-  return cleaned.slice(0, 180) || fallback;
+  if (!cleaned) return fallback;
+  if (cleaned.length <= 180) return cleaned;
+
+  const dotIdx = cleaned.lastIndexOf(".");
+  if (dotIdx > 0 && dotIdx < cleaned.length - 1 && cleaned.length - dotIdx <= 16) {
+    const ext = cleaned.slice(dotIdx);
+    const stem = cleaned.slice(0, Math.max(1, 180 - ext.length));
+    return `${stem}${ext}`;
+  }
+  return cleaned.slice(0, 180);
 }

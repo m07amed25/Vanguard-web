@@ -260,7 +260,7 @@ select {
 
 .workspace-scroll {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border-control) var(--color-surface);
+  scrollbar-color: var(--color-border-control) var(--color-canvas);
 }
 
 .workspace-scroll::-webkit-scrollbar {
@@ -275,7 +275,7 @@ select {
 }
 
 .workspace-scroll::-webkit-scrollbar-track {
-  background-color: var(--color-surface);
+  background-color: var(--color-canvas);
 }
 
 @media (forced-colors: active) {
@@ -287,5 +287,15 @@ select {
 
   .workspace-nav-active {
     outline: 1px solid Highlight;
+  }
+}
+
+@media (scripting: none) {
+  .workspace-menu-trigger {
+    display: none;
+  }
+
+  .workspace-mobile-header:has(details[open]) {
+    position: static;
   }
 }

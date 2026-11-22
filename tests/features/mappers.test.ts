@@ -390,7 +390,7 @@ describe("upstream response normalizers", () => {
     }
   });
 
-  it("maps non-malicious URL responses (including uncertain or review states) strictly to benign", () => {
+  it("routes unsupported, unavailable, and uncertain URL single responses to review (never benign) and propagates uncertainty factors", () => {
     const unsupported = mapUrlSingleResponse({
       url: "javascript:alert(1)",
       status: "unsupported",
@@ -414,8 +414,32 @@ describe("upstream response normalizers", () => {
       analyzed_at: "2026-11-20T12:00:00Z",
     });
 
-    assert.equal(unsupported.verdict, "benign");
-    assert.equal(unsupported.isUncertain, false);
+    assert.equal(unsupported.verdict, "review");
+    assert.equal(unsupported.coverage, "unsupported");
+    assert.equal(unsupported.isUncertain, true);
+    assert.equal(unsupported.riskScore, null);
+    assert.equal(unsupported.summary.includes("5-branch"), false);
+    assert.equal(unsupported.summary.includes("WHATWG"), false);
+
+    const unavailable = mapUrlSingleResponse({
+      url: "https://offline.example.test",
+      status: "unavailable",
+      reason_code: "scorer_unavailable",
+      input_kind: "full_url",
+      prediction: "unknown",
+      label: "unknown",
+      verdict: "review",
+      is_malicious: false,
+      malicious_probability: null,
+      benign_probability: null,
+      confidence: null,
+      risk_level: "UNKNOWN",
+      is_uncertain: true,
+    });
+
+    assert.equal(unavailable.verdict, "review");
+    assert.equal(unavailable.coverage, "unreadable");
+    assert.equal(unavailable.isUncertain, true);
 
     const uncertain = mapUrlSingleResponse({
       url: "https://vanguard-test-ten.vercel.app/",
@@ -443,16 +467,17 @@ describe("upstream response normalizers", () => {
       },
     });
 
-    assert.equal(uncertain.verdict, "benign");
-    assert.equal(uncertain.coverage, "complete");
-    assert.equal(uncertain.isUncertain, false);
+    assert.equal(uncertain.verdict, "review");
+    assert.equal(uncertain.coverage, "ambiguous");
+    assert.equal(uncertain.isUncertain, true);
+    assert.deepEqual(uncertain.uncertaintyReasons, ["high_prediction_entropy"]);
   });
 
-  it("maps URL batch responses strictly to malicious or benign", () => {
-    const cleanBatch = mapUrlBatchResponse({
+  it("maps URL batch responses with mutually exclusive benignCount and uncertainCount and review precedence", () => {
+    const mixedBatch = mapUrlBatchResponse({
       summary: {
-        total_urls: 2,
-        scored_count: 1,
+        total_urls: 3,
+        scored_count: 2,
         unsupported_count: 1,
         unavailable_count: 0,
         malicious_count: 0,
@@ -493,16 +518,81 @@ describe("upstream response normalizers", () => {
           confidence: 0.69,
           risk_level: "LOW",
           is_uncertain: true,
+          verdict_details: {
+            uncertainty_factors: ["borderline_decision_margin"],
+          },
+        },
+        {
+          url: "ftp://files.example.test/archive.zip",
+          status: "unsupported",
+          reason_code: "unsupported_scheme",
+          input_kind: "unknown",
+          is_malicious: false,
+          is_uncertain: true,
         },
       ],
     });
 
-    assert.equal(cleanBatch.verdict, "benign");
-    assert.equal(cleanBatch.coverage, "complete");
-    assert.equal(cleanBatch.details.kind, "url");
-    if (cleanBatch.details.kind === "url") {
-      assert.equal(cleanBatch.details.items[0]?.verdict, "benign");
-      assert.equal(cleanBatch.details.items[1]?.verdict, "benign");
+    assert.equal(mixedBatch.verdict, "review");
+    assert.equal(mixedBatch.coverage, "partial");
+    assert.equal(mixedBatch.isUncertain, true);
+    assert.equal(mixedBatch.details.kind, "url");
+    if (mixedBatch.details.kind === "url") {
+      assert.equal(mixedBatch.details.items[0]?.verdict, "benign");
+      assert.equal(mixedBatch.details.items[1]?.verdict, "review");
+      assert.equal(mixedBatch.details.items[2]?.verdict, "review");
+      assert.equal(mixedBatch.details.batchSummary?.totalUrls, 3);
+      assert.equal(mixedBatch.details.batchSummary?.maliciousCount, 0);
+      assert.equal(mixedBatch.details.batchSummary?.benignCount, 1);
+      assert.equal(mixedBatch.details.batchSummary?.uncertainCount, 1);
+      assert.equal(mixedBatch.details.batchSummary?.unsupportedCount, 1);
     }
+  });
+
+  it("never falls back to benign on unrecognized URL statuses, empty batches, or encrypted/forced-review confidence", () => {
+    const errorUrl = mapUrlSingleResponse({
+      url: "https://example.test/timeout",
+      status: "error",
+      reason_code: "internal_timeout",
+      is_malicious: false,
+    });
+    assert.equal(errorUrl.verdict, "review");
+    assert.equal(errorUrl.coverage, "unreadable");
+
+    const emptyUrlBatch = mapUrlBatchResponse({ results: [] });
+    assert.equal(emptyUrlBatch.verdict, "review");
+    assert.equal(emptyUrlBatch.coverage, "unreadable");
+
+    const emptySmsBatch = mapSmsBatchResponse({ results: [] });
+    assert.equal(emptySmsBatch.verdict, "review");
+    assert.equal(emptySmsBatch.coverage, "unreadable");
+
+    const partialOffice = mapOfficeResponse(
+      {
+        scan_status: "partial",
+        verdict: "benign",
+        malice_prob: 0.05,
+        observed_format: "opc",
+      },
+      { filename: "partial.docx", sizeBytes: 1024 },
+    );
+    assert.equal(partialOffice.verdict, "review");
+    assert.equal(partialOffice.confidence, null);
+
+    const encryptedPdf = mapPdfResponse(
+      {
+        prediction: "benign",
+        is_malicious: false,
+        confidence: 0.91,
+        malicious_probability: 0.09,
+        risk_level: "LOW",
+        is_uncertain: false,
+        pdf_metadata: { is_encrypted: true, parse_success: true },
+      },
+      { filename: "locked.pdf", sizeBytes: 2048, deepInspection: true },
+    );
+    assert.equal(encryptedPdf.verdict, "review");
+    assert.equal(encryptedPdf.confidence, null);
+    assert.equal(encryptedPdf.riskTier, "UNAVAILABLE");
   });
 });

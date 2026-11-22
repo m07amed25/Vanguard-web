@@ -49,24 +49,67 @@ describe("server-side file content & option validation", () => {
     if (!overRes.ok) assert.equal(overRes.code, "payload_too_large");
   });
 
-  it("accepts valid Office formats (OOXML ZIP, OLE2, RTF, XML) and rejects renamed plain text or PNG", () => {
-    const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
-    assert.equal(validateOfficeBytes(zipBytes).ok, true);
+  it("accepts valid Office formats (OOXML ZIP with Central Directory/entries, OLE2, RTF, XML) and rejects truncated 6-byte ZIP, generic non-Office ZIP, or extension mismatches", () => {
+    const enc = new TextEncoder();
+    const entryName = enc.encode("[Content_Types].xml");
+    const body = enc.encode("<Types/>");
+    const validOoxmlZip = new Uint8Array(30 + entryName.length + body.length);
+    const view = new DataView(validOoxmlZip.buffer);
+    validOoxmlZip[0] = 0x50;
+    validOoxmlZip[1] = 0x4b;
+    validOoxmlZip[2] = 0x03;
+    validOoxmlZip[3] = 0x04;
+    view.setUint16(4, 20, true);
+    view.setUint32(18, body.length, true);
+    view.setUint32(22, body.length, true);
+    view.setUint16(26, entryName.length, true);
+    validOoxmlZip.set(entryName, 30);
+    validOoxmlZip.set(body, 30 + entryName.length);
+    assert.equal(validateOfficeBytes(validOoxmlZip, "report.docx").ok, true);
+
+    const truncatedSixByteZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
+    assert.equal(validateOfficeBytes(truncatedSixByteZip, "truncated.docx").ok, false);
+
+    const genericName = enc.encode("readme.txt");
+    const genericZip = new Uint8Array(30 + genericName.length + body.length);
+    const gView = new DataView(genericZip.buffer);
+    genericZip[0] = 0x50;
+    genericZip[1] = 0x4b;
+    genericZip[2] = 0x03;
+    genericZip[3] = 0x04;
+    gView.setUint16(4, 20, true);
+    gView.setUint32(18, body.length, true);
+    gView.setUint32(22, body.length, true);
+    gView.setUint16(26, genericName.length, true);
+    genericZip.set(genericName, 30);
+    genericZip.set(body, 30 + genericName.length);
+    const genericRes = validateOfficeBytes(genericZip, "spoofed.docx");
+    assert.equal(genericRes.ok, false);
+    if (!genericRes.ok) {
+      assert.equal(genericRes.code, "unsupported_content");
+      assert.equal(genericRes.httpStatus, 422);
+    }
 
     const oleBytes = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-    assert.equal(validateOfficeBytes(oleBytes).ok, true);
+    assert.equal(validateOfficeBytes(oleBytes, "legacy.doc").ok, true);
 
     const rtfBytes = new TextEncoder().encode("{\\rtf1\\ansi Inert test document.}");
-    assert.equal(validateOfficeBytes(rtfBytes).ok, true);
+    assert.equal(validateOfficeBytes(rtfBytes, "notes.rtf").ok, true);
 
     const xmlBytes = new TextEncoder().encode('<?xml version="1.0"?><Workbook/>');
-    assert.equal(validateOfficeBytes(xmlBytes).ok, true);
+    assert.equal(validateOfficeBytes(xmlBytes, "sheet.xls").ok, true);
 
     const disguised = validateOfficeBytes(
       new TextEncoder().encode("not an office document"),
+      "fake.docx",
     );
     assert.equal(disguised.ok, false);
     if (!disguised.ok) assert.equal(disguised.code, "unsupported_content");
+
+    // Valid OLE2 bytes claiming .pdf extension must be blocked by extension mismatch
+    const mismatchedExt = validateOfficeBytes(oleBytes, "wrong.pdf");
+    assert.equal(mismatchedExt.ok, false);
+    if (!mismatchedExt.ok) assert.equal(mismatchedExt.code, "unsupported_content");
   });
 
   it("accepts valid %PDF- files (including minor leading offset) and rejects disguised files", () => {

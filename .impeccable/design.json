@@ -34,16 +34,16 @@
       },
       "canvas": {
         "role": "neutral",
-        "displayName": "Workspace canvas",
+        "displayName": "Workspace canvas (#08080a)",
         "tonalRamp": [
-          "oklch(15% 0.005 145.3)",
-          "oklch(26% 0.005 145.3)",
-          "oklch(37% 0.005 145.3)",
-          "oklch(49% 0.005 145.3)",
-          "oklch(60% 0.005 145.3)",
-          "oklch(72% 0.005 145.3)",
-          "oklch(84% 0.005 145.3)",
-          "oklch(95% 0.005 145.3)"
+          "oklch(13.5% 0.004 285.8)",
+          "oklch(24% 0.004 285.8)",
+          "oklch(36% 0.004 285.8)",
+          "oklch(48% 0.004 285.8)",
+          "oklch(60% 0.004 285.8)",
+          "oklch(72% 0.004 285.8)",
+          "oklch(84% 0.004 285.8)",
+          "oklch(95% 0.004 285.8)"
         ]
       },
       "surface": {
@@ -407,7 +407,7 @@
       "refersTo": "field",
       "description": "Show the label, field, and help together.",
       "html": "<label class=\"ds-label\">URL <input class=\"ds-field\" type=\"text\" placeholder=\"https://example.com\" aria-describedby=\"ds-url-help\"></label><p id=\"ds-url-help\" class=\"ds-help\">Enter the address you want to check.</p>",
-      "css": ".ds-label { display: grid; gap: 0.5rem; color: #e2ebe0; font: 600 0.875rem/1.25rem Outfit, ui-sans-serif, system-ui, sans-serif; } .ds-field { box-sizing: border-box; background: #1a1a1a; color: #e2ebe0; min-height: 2.75rem; padding: 0.5rem 0.75rem; border-radius: 12px; font: 400 1rem/1.5rem Outfit, ui-sans-serif, system-ui, sans-serif; min-width: 0; border: 1px solid #708070; } .ds-field::placeholder { color: #a1afa0; opacity: 1; } .ds-field:focus { border-color: #8cdb78; } .ds-field[aria-invalid=\"true\"] { border-color: #ff9d9d; } .ds-field:focus-visible { outline: 2px solid #8cdb78; outline-offset: 2px; } .ds-help { margin: 0.5rem 0 0; color: #a1afa0; font: 400 0.875rem/1.25rem Outfit, ui-sans-serif, system-ui, sans-serif; }"
+      "css": ".ds-label { display: grid; gap: 0.5rem; color: #e2ebe0; font: 600 0.875rem/1.25rem Outfit, ui-sans-serif, system-ui, sans-serif; } .ds-field { box-sizing: border-box; background: #08080a; color: #e2ebe0; min-height: 2.75rem; padding: 0.5rem 0.75rem; border-radius: 12px; font: 400 1rem/1.5rem Outfit, ui-sans-serif, system-ui, sans-serif; min-width: 0; border: 1px solid #708070; } .ds-field::placeholder { color: #a1afa0; opacity: 1; } .ds-field:focus { border-color: #8cdb78; } .ds-field[aria-invalid=\"true\"] { border-color: #ff9d9d; } .ds-field:focus-visible { outline: 2px solid #8cdb78; outline-offset: 2px; } .ds-help { margin: 0.5rem 0 0; color: #a1afa0; font: 400 0.875rem/1.25rem Outfit, ui-sans-serif, system-ui, sans-serif; }"
     },
     {
       "name": "Review badge",

@@ -78,7 +78,7 @@ export async function POST(request: Request) {
 
   const filename = sanitizeDisplayFilename(fileEntry.name, "sample.exe");
   const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-  const validation = validateExeBytes(bytes);
+  const validation = validateExeBytes(bytes, filename);
   if (!validation.ok) {
     return scanErrorResponse({
       status: validation.httpStatus,

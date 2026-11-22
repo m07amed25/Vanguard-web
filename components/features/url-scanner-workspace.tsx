@@ -1,12 +1,14 @@
 "use client";
 
-import { AlertCircle, Paperclip, RefreshCw, X } from "lucide-react";
+import { AlertCircle, Loader2, Paperclip, RefreshCw, X } from "lucide-react";
 import {
+  useEffect,
   useId,
   useRef,
   useState,
   type DragEvent,
   type FormEvent,
+  type KeyboardEvent,
 } from "react";
 import {
   FIVE_MIB,
@@ -17,17 +19,27 @@ import {
 } from "@/lib/features/catalog";
 import type {
   ExecutionState,
+  PendingTriageHandoff,
   ScanApiResponse,
   ScanErrorResponse,
   ScanOutcome,
 } from "@/lib/features/types";
 import { CopyButton } from "./copy-button";
 import { ScanResultPanel } from "./scan-result-panel";
+import { useTriageHandoff } from "./workspace-provider";
 
 type UrlMode = "single" | "batch";
 
+interface RunScanOverrides {
+  mode?: UrlMode;
+  singleUrl?: string;
+  batchText?: string;
+  batchFile?: File | null;
+}
+
 export function UrlScannerWorkspace() {
   const feature = getFeatureDefinition("url");
+  const { claimHandoff } = useTriageHandoff();
   const baseId = useId();
   const singleInputId = `${baseId}-single-url`;
   const batchInputId = `${baseId}-batch-urls`;
@@ -35,6 +47,9 @@ export function UrlScannerWorkspace() {
   const errorId = `${baseId}-error`;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
+  const scanSeqRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const handledHandoffIdRef = useRef<string | null>(null);
 
   const [mode, setMode] = useState<UrlMode>("single");
   const [singleUrl, setSingleUrl] = useState("");
@@ -103,11 +118,23 @@ export function UrlScannerWorkspace() {
     }
   }
 
-  async function runScan() {
-    if (submittingRef.current) return;
+  async function runScan(overrides?: RunScanOverrides, supersede = false) {
+    if (submittingRef.current && !supersede) return;
 
-    if (mode === "single") {
-      const trimmed = singleUrl.trim();
+    const targetMode = overrides?.mode ?? mode;
+    const targetSingleUrl = overrides?.singleUrl ?? singleUrl;
+    const targetBatchText = overrides?.batchText ?? batchText;
+    const targetBatchFile =
+      overrides && "batchFile" in overrides
+        ? (overrides.batchFile ?? null)
+        : batchFile;
+    const targetBatchLines = targetBatchText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => Boolean(line) && !line.startsWith("#"));
+
+    if (targetMode === "single") {
+      const trimmed = targetSingleUrl.trim();
       if (!trimmed) {
         setFieldError("Paste or type an HTTP(S) URL or bare domain to inspect.");
         setErrorResponse(null);
@@ -124,15 +151,15 @@ export function UrlScannerWorkspace() {
         setLiveStatus("Entered URL exceeds the character limit.");
         return;
       }
-    } else if (batchFile) {
-      if (batchFile.size === 0) {
+    } else if (targetBatchFile) {
+      if (targetBatchFile.size === 0) {
         setFieldError("The selected file is empty (0 bytes).");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Selected file is empty.");
         return;
       }
-      if (batchFile.size > FIVE_MIB) {
+      if (targetBatchFile.size > FIVE_MIB) {
         setFieldError("URL batch import files must be 5 MiB or smaller.");
         setErrorResponse(null);
         setExecState("idle");
@@ -140,7 +167,7 @@ export function UrlScannerWorkspace() {
         return;
       }
     } else {
-      if (parsedBatchLines.length === 0) {
+      if (targetBatchLines.length === 0) {
         setFieldError(
           "Enter at least 1 URL (one per line) or import a batch file.",
         );
@@ -149,16 +176,16 @@ export function UrlScannerWorkspace() {
         setLiveStatus("Enter at least 1 URL or import a batch file.");
         return;
       }
-      if (parsedBatchLines.length > URL_MAX_BATCH_ITEMS) {
+      if (targetBatchLines.length > URL_MAX_BATCH_ITEMS) {
         setFieldError(
-          `Batch scans accept at most ${URL_MAX_BATCH_ITEMS} URLs at a time (currently ${parsedBatchLines.length}).`,
+          `Batch scans accept at most ${URL_MAX_BATCH_ITEMS} URLs at a time (currently ${targetBatchLines.length}).`,
         );
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Batch URL count exceeds the 256-URL limit.");
         return;
       }
-      const tooLongIdx = parsedBatchLines.findIndex(
+      const tooLongIdx = targetBatchLines.findIndex(
         (line) => line.length > URL_MAX_LENGTH,
       );
       if (tooLongIdx !== -1) {
@@ -172,35 +199,44 @@ export function UrlScannerWorkspace() {
       }
     }
 
+    if (supersede) {
+      abortControllerRef.current?.abort();
+    }
+    const seq = ++scanSeqRef.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     submittingRef.current = true;
     setFieldError("");
     setErrorResponse(null);
     setExecState("submitting");
     setLiveStatus(
-      mode === "batch"
-        ? "Analyzing URL batch statically across 5 branches. Please wait..."
-        : "Analyzing URL statically across 5 branches. Please wait...",
+      targetMode === "batch"
+        ? "Analyzing URL batch with the offline URL structure and link pattern scanner. Please wait..."
+        : "Analyzing URL with the offline URL structure and link pattern scanner. Please wait...",
     );
 
     try {
       let response: Response;
-      if (mode === "batch" && batchFile) {
+      if (targetMode === "batch" && targetBatchFile) {
         const formData = new FormData();
-        formData.append("file", batchFile);
+        formData.append("file", targetBatchFile);
         formData.append("includeDetails", "true");
         response = await fetch(feature.apiPath, {
           method: "POST",
           body: formData,
+          signal: controller.signal,
         });
-      } else if (mode === "batch") {
+      } else if (targetMode === "batch") {
         response = await fetch(feature.apiPath, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             mode: "batch",
-            urls: parsedBatchLines.map((url) => ({ url })),
+            urls: targetBatchLines.map((url) => ({ url })),
             includeDetails: true,
           }),
+          signal: controller.signal,
         });
       } else {
         response = await fetch(feature.apiPath, {
@@ -208,13 +244,16 @@ export function UrlScannerWorkspace() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             mode: "single",
-            url: singleUrl.trim(),
+            url: targetSingleUrl.trim(),
             includeDetails: true,
           }),
+          signal: controller.signal,
         });
       }
+      if (seq !== scanSeqRef.current) return;
 
       const data = (await response.json()) as ScanApiResponse;
+      if (seq !== scanSeqRef.current) return;
 
       if (!response.ok || data.status === "failed") {
         const err: ScanErrorResponse =
@@ -243,6 +282,7 @@ export function UrlScannerWorkspace() {
       setExecState("completed");
       setLiveStatus(`Scan completed: ${data.verdictLabel}.`);
     } catch {
+      if (seq !== scanSeqRef.current) return;
       const networkErr: ScanErrorResponse = {
         status: "failed",
         code: "service_unavailable",
@@ -255,13 +295,66 @@ export function UrlScannerWorkspace() {
       setExecState("failed");
       setLiveStatus(networkErr.message);
     } finally {
-      submittingRef.current = false;
+      if (seq === scanSeqRef.current) {
+        submittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   }
+
+  function runScanWithHandoff(handoff: PendingTriageHandoff) {
+    if (handoff.kind !== "url") return;
+    abortControllerRef.current?.abort();
+    submittingRef.current = false;
+    setOutcome(null);
+    setErrorResponse(null);
+    setFieldError("");
+    setExecState("idle");
+    setBatchFile(null);
+
+    if (handoff.mode === "batch") {
+      setMode("batch");
+      setBatchText(handoff.text);
+      setLiveStatus("Loaded your URL list into batch mode. Review and submit when ready.");
+      return;
+    }
+
+    setMode("single");
+    setSingleUrl(handoff.text);
+    if (handoff.autoSubmit) {
+      void runScan({ mode: "single", singleUrl: handoff.text, batchFile: null }, true);
+    }
+  }
+
+  const runScanWithHandoffRef = useRef(runScanWithHandoff);
+  useEffect(() => {
+    runScanWithHandoffRef.current = runScanWithHandoff;
+  });
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      const pending = claimHandoff("url");
+      if (!pending || pending.id === handledHandoffIdRef.current) return;
+      handledHandoffIdRef.current = pending.id;
+      runScanWithHandoffRef.current(pending);
+    });
+    return () => {
+      active = false;
+    };
+  }, [claimHandoff]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void runScan();
+  }
+
+  function handleTextareaKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runScan();
+    }
   }
 
   function handleReset() {
@@ -291,11 +384,11 @@ export function UrlScannerWorkspace() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         noValidate
-        className={`workspace-panel overflow-hidden rounded-xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
+        className={`workspace-panel divide-y divide-outline overflow-hidden rounded-2xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
           fieldError
             ? "border-danger"
             : dragging
-              ? "border-accent bg-surface-selected/40"
+              ? "border-accent bg-surface-selected/35"
               : "border-outline"
         }`}
       >
@@ -308,16 +401,17 @@ export function UrlScannerWorkspace() {
           className="sr-only"
           onChange={(event) => {
             const chosen = event.currentTarget.files?.[0] ?? null;
+            event.currentTarget.value = "";
             selectBatchFile(chosen);
           }}
         />
 
         {/* Top hairline bar: mode tabs + live counter */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-outline px-5 py-2.5 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 sm:px-6">
           <div
             role="group"
             aria-label="Inspection mode"
-            className="flex flex-wrap items-center gap-1"
+            className="flex flex-wrap items-center gap-5"
           >
             <button
               type="button"
@@ -328,10 +422,10 @@ export function UrlScannerWorkspace() {
                 setFieldError("");
                 setErrorResponse(null);
               }}
-              className={`inline-flex min-h-11 cursor-pointer items-center rounded-lg px-3 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
                 mode === "single"
-                  ? "workspace-nav-active bg-surface-selected text-accent"
-                  : "text-muted-foreground hover:bg-surface-hover hover:text-foreground"
+                  ? "workspace-nav-active border-accent text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
               Single URL
@@ -346,32 +440,32 @@ export function UrlScannerWorkspace() {
                 setFieldError("");
                 setErrorResponse(null);
               }}
-              className={`inline-flex min-h-11 cursor-pointer items-center rounded-lg px-3 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
                 mode === "batch"
-                  ? "workspace-nav-active bg-surface-selected text-accent"
-                  : "text-muted-foreground hover:bg-surface-hover hover:text-foreground"
+                  ? "workspace-nav-active border-accent text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
               Batch (up to {URL_MAX_BATCH_ITEMS})
             </button>
           </div>
 
-          <span className="font-mono text-xs text-muted-foreground tabular-nums">
+          <span className="py-2 font-mono text-xs text-muted-foreground tabular-nums">
             {mode === "single"
-              ? `${singleUrl.trim().length.toLocaleString()} / ${URL_MAX_LENGTH.toLocaleString()} chars`
+              ? `${singleUrl.trim().length.toLocaleString()} / ${URL_MAX_LENGTH.toLocaleString()}`
               : batchFile
                 ? formatBytes(batchFile.size)
-                : `${parsedBatchLines.length} / ${URL_MAX_BATCH_ITEMS} URLs`}
+                : `${parsedBatchLines.length} / ${URL_MAX_BATCH_ITEMS}`}
           </span>
         </div>
 
         {/* Main input body */}
-        <div className="px-5 py-4 sm:px-6 sm:py-5">
+        <div className="px-5 py-5 sm:px-6">
           {mode === "single" ? (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <label
                 htmlFor={singleInputId}
-                className="block text-sm font-semibold text-foreground"
+                className="text-xs font-medium text-muted-foreground"
               >
                 HTTP(S) URL or bare domain
               </label>
@@ -388,42 +482,37 @@ export function UrlScannerWorkspace() {
                 maxLength={URL_MAX_LENGTH + 100}
                 aria-invalid={fieldError ? true : undefined}
                 aria-describedby={fieldError ? errorId : undefined}
-                placeholder="https://example.com/login?verify=1 or bare-domain.example.com"
+                placeholder="https://example.com/login or bare-domain.example.com"
                 onChange={(event) => {
                   setSingleUrl(event.currentTarget.value);
                   if (fieldError) setFieldError("");
                 }}
-                className={`min-h-11 w-full rounded-xl border bg-canvas px-3.5 py-2.5 font-mono text-sm leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                className={`min-h-11 w-full rounded-lg border bg-canvas px-3.5 py-2 font-mono text-sm text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
                   fieldError ? "border-danger" : "border-border-control"
                 }`}
               />
             </div>
           ) : batchFile ? (
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 flex-1 space-y-1">
-                <span className="block text-sm font-semibold text-foreground">
-                  Batch URL file
+              <div className="flex min-w-0 items-center gap-2 text-sm">
+                <Paperclip
+                  aria-hidden="true"
+                  className="size-4 shrink-0 text-accent"
+                  strokeWidth={1.75}
+                />
+                <span
+                  className="truncate font-mono text-foreground"
+                  title={batchFile.name}
+                >
+                  {batchFile.name}
                 </span>
-                <div className="flex min-w-0 items-center gap-2 text-sm">
-                  <Paperclip
-                    aria-hidden="true"
-                    className="size-4 shrink-0 text-accent"
-                    strokeWidth={1.75}
-                  />
-                  <span
-                    className="truncate font-mono font-medium text-foreground"
-                    title={batchFile.name}
-                  >
-                    {batchFile.name}
-                  </span>
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
-                    · {formatBytes(batchFile.size)}
-                  </span>
-                  <CopyButton
-                    value={batchFile.name}
-                    ariaLabel="Copy selected batch filename"
-                  />
-                </div>
+                <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+                  · {formatBytes(batchFile.size)}
+                </span>
+                <CopyButton
+                  value={batchFile.name}
+                  ariaLabel="Copy selected batch filename"
+                />
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -431,7 +520,7 @@ export function UrlScannerWorkspace() {
                   type="button"
                   disabled={isSubmitting}
                   onClick={openFilePicker}
-                  className="inline-flex min-h-11 cursor-pointer items-center rounded-xl border border-border-control bg-canvas px-4 text-sm font-semibold text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
                 >
                   Change file
                 </button>
@@ -440,23 +529,23 @@ export function UrlScannerWorkspace() {
                   disabled={isSubmitting}
                   onClick={clearBatchFile}
                   aria-label="Remove selected batch file"
-                  className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-outline bg-canvas text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:border-border-control hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg border border-border-control bg-canvas text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
                 >
                   <X aria-hidden="true" className="size-4" strokeWidth={1.75} />
                 </button>
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <label
                 htmlFor={batchInputId}
-                className="block text-sm font-semibold text-foreground"
+                className="text-xs font-medium text-muted-foreground"
               >
                 Batch URLs (one per line)
               </label>
               <textarea
                 id={batchInputId}
-                rows={5}
+                rows={4}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="none"
@@ -466,13 +555,14 @@ export function UrlScannerWorkspace() {
                 aria-invalid={fieldError ? true : undefined}
                 aria-describedby={fieldError ? errorId : undefined}
                 placeholder={
-                  "https://example.com/auth\nhttp://login-verify.example.net/account\n# Or drop a .txt, .csv, .json, or .jsonl file here..."
+                  "Paste one URL per line, or drop a .txt, .csv, .json, or .jsonl file..."
                 }
+                onKeyDown={handleTextareaKeyDown}
                 onChange={(event) => {
                   setBatchText(event.currentTarget.value);
                   if (fieldError) setFieldError("");
                 }}
-                className={`min-h-32 w-full rounded-xl border bg-canvas px-3.5 py-2.5 font-mono text-sm leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                className={`min-h-28 w-full rounded-lg border bg-canvas px-3.5 py-2.5 font-mono text-sm leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
                   fieldError ? "border-danger" : "border-border-control"
                 }`}
               />
@@ -481,27 +571,25 @@ export function UrlScannerWorkspace() {
         </div>
 
         {/* Footer action bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-outline px-5 py-3.5 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
           <div className="flex flex-wrap items-center gap-2">
             {mode === "batch" && !batchFile ? (
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={openFilePicker}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-xl border border-border-control bg-canvas px-4 text-sm font-semibold text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
               >
-                Import file (.txt, .csv, .json, .jsonl)
+                Import file
               </button>
             ) : (
-              <p className="text-xs text-muted-foreground">
-                {mode === "single"
-                  ? "Offline 5-branch fusion — destinations are never visited over the network."
-                  : "Accepted batch files: .txt, .csv, .json, .jsonl up to 5 MiB."}
+              <p className="max-w-[55ch] text-xs text-muted-foreground">
+                Enter full HTTP(S) URLs, IP addresses, or internationalized domains — links are never fetched or opened.
               </p>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             {((mode === "single" && singleUrl.length > 0) ||
               (mode === "batch" && !batchFile && batchText.length > 0)) && (
               <button
@@ -516,7 +604,7 @@ export function UrlScannerWorkspace() {
                   setFieldError("");
                   setErrorResponse(null);
                 }}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-xl border border-outline bg-canvas px-3.5 text-sm font-semibold text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:border-border-control hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
               >
                 Clear
               </button>
@@ -526,20 +614,29 @@ export function UrlScannerWorkspace() {
               id="features-url-submit"
               type="submit"
               disabled={isSubmitting}
-              className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl bg-primary px-5 text-sm font-semibold text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
+              className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
             >
-              {isSubmitting
-                ? "Scanning..."
-                : mode === "batch"
-                  ? "Scan batch"
-                  : "Scan URL"}
+              {isSubmitting && (
+                <Loader2
+                  aria-hidden="true"
+                  className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
+                  strokeWidth={1.75}
+                />
+              )}
+              <span>
+                {isSubmitting
+                  ? "Scanning..."
+                  : mode === "batch"
+                    ? "Scan batch"
+                    : "Scan URL"}
+              </span>
             </button>
           </div>
         </div>
 
         {fieldError && (
-          <div className="border-t border-danger/35 bg-danger-bg/25 px-5 py-3 sm:px-6">
-            <p id={errorId} role="alert" className="text-sm font-medium text-danger">
+          <div className="bg-danger-bg/20 px-4 py-2.5 sm:px-5">
+            <p id={errorId} role="alert" className="text-xs font-medium text-danger break-words">
               {fieldError}
             </p>
           </div>
@@ -548,37 +645,33 @@ export function UrlScannerWorkspace() {
         {isSubmitting && (
           <div
             aria-busy="true"
-            className="border-t border-outline bg-surface-raised/50 px-5 py-3 text-xs text-muted-foreground sm:px-6"
+            className="px-4 py-2.5 text-xs text-muted-foreground sm:px-5"
           >
-            {mode === "batch"
-              ? "Parsing WHATWG URL components, extracting 18 lexical features, and scoring batch across 5 offline branches..."
-              : "Parsing WHATWG URL components, extracting 18 lexical features, and scoring across 5 offline branches..."}
+            Checking link structure, domain patterns, and path signals offline — links are never fetched or opened...
           </div>
         )}
 
         {errorResponse && (
           <div
             role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 border-t border-danger/35 bg-danger-bg/25 px-5 py-3 text-sm sm:px-6"
+            className="flex flex-wrap items-center justify-between gap-3 bg-danger-bg/20 px-4 py-2.5 text-xs sm:px-5"
           >
-            <div className="flex min-w-0 items-start gap-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AlertCircle
                 aria-hidden="true"
-                className="mt-0.5 size-4 shrink-0 text-danger"
+                className="size-3.5 shrink-0 text-danger"
                 strokeWidth={1.75}
               />
-              <div className="min-w-0">
-                <p className="font-medium text-foreground">{errorResponse.message}</p>
-                <div className="flex flex-wrap items-center gap-1">
-                  <p className="font-mono text-xs text-muted-foreground">
-                    Ref: {errorResponse.diagnosticId}
-                  </p>
-                  <CopyButton
-                    value={errorResponse.diagnosticId}
-                    ariaLabel="Copy diagnostic reference ID"
-                  />
-                </div>
-              </div>
+              <span className="font-medium text-foreground break-words">
+                {errorResponse.message}
+              </span>
+              <span className="font-mono text-muted-foreground">
+                · {errorResponse.diagnosticId}
+              </span>
+              <CopyButton
+                value={errorResponse.diagnosticId}
+                ariaLabel="Copy diagnostic reference ID"
+              />
             </div>
 
             {errorResponse.retryable && (
@@ -586,10 +679,10 @@ export function UrlScannerWorkspace() {
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => void runScan()}
-                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-xl border border-border-control bg-surface px-3.5 text-xs font-semibold text-foreground hover:bg-surface-hover"
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-hover active:bg-surface-selected"
               >
                 <RefreshCw aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
-                <span>Try again</span>
+                <span>Retry</span>
               </button>
             )}
           </div>

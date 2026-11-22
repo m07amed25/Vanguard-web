@@ -1,67 +1,63 @@
 "use client";
 
 import { RefreshCw } from "lucide-react";
-import { useState } from "react";
-import type {
-  FeatureSlug,
-  ServiceReadinessSnapshot,
-} from "@/lib/features/types";
+import type { FeatureSlug } from "@/lib/features/types";
 import { ReadinessBadge } from "./readiness-badge";
+import { useReadiness } from "./workspace-provider";
 
 interface FeatureReadinessClientProps {
   slug: FeatureSlug;
-  initialSnapshot: ServiceReadinessSnapshot;
 }
 
-export function FeatureReadinessClient({
-  slug,
-  initialSnapshot,
-}: FeatureReadinessClientProps) {
-  const [snapshot, setSnapshot] = useState(initialSnapshot);
-  const [checking, setChecking] = useState(false);
-  const current = snapshot.features[slug];
+export function FeatureReadinessClient({ slug }: FeatureReadinessClientProps) {
+  const {
+    snapshot,
+    isChecking,
+    isInitialLoading,
+    refreshError,
+    refreshHealth,
+  } = useReadiness();
 
-  async function recheck() {
-    if (checking) return;
-    setChecking(true);
-    try {
-      const response = await fetch("/api/features/health", {
-        cache: "no-store",
-      });
-      if (response.ok) {
-        const next = (await response.json()) as ServiceReadinessSnapshot;
-        setSnapshot(next);
-      }
-    } catch {
-      // Keep prior status visible if network re-check fails.
-    } finally {
-      setChecking(false);
-    }
-  }
+  const current = snapshot.features[slug];
+  const badgeStatus = isInitialLoading
+    ? "checking"
+    : current?.ready
+      ? "ready"
+      : "unavailable";
 
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex flex-wrap items-center gap-2"
-    >
-      <ReadinessBadge
-        status={checking ? "checking" : current.ready ? "ready" : "unavailable"}
-        latencyMs={current.latencyMs}
-      />
-      <button
-        type="button"
-        onClick={recheck}
-        disabled={checking}
-        className="inline-flex min-h-9 cursor-pointer items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-60"
+    <div className="flex flex-col items-start gap-1 sm:items-end">
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex flex-wrap items-center gap-2"
       >
-        <RefreshCw
-          aria-hidden="true"
-          className={`size-3 ${checking ? "motion-safe:animate-spin" : ""}`}
-          strokeWidth={1.75}
+        <ReadinessBadge
+          status={badgeStatus}
+          latencyMs={current?.latencyMs ?? null}
         />
-        <span>{checking ? "Checking" : "Refresh"}</span>
-      </button>
+        <button
+          type="button"
+          onClick={() => void refreshHealth()}
+          disabled={isChecking}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-canvas px-3 text-xs font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-60"
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={`size-3.5 shrink-0 ${
+              isChecking ? "motion-safe:animate-spin motion-reduce:hidden" : ""
+            }`}
+            strokeWidth={1.75}
+          />
+          <span>{isChecking ? "Checking..." : "Refresh"}</span>
+        </button>
+      </div>
+
+      {refreshError && (
+        <p role="status" aria-live="polite" className="text-xs text-caution">
+          {refreshError}
+        </p>
+      )}
     </div>
   );
 }

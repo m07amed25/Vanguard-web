@@ -1,11 +1,6 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
 import { FeatureWorkspaceShell } from "@/components/features/feature-workspace-shell";
 import { FileScannerWorkspace } from "@/components/features/file-scanner-workspace";
-import {
-  SingleFeatureReadinessFallback,
-  SingleFeatureReadinessStream,
-} from "@/components/features/readiness-stream";
 
 export const metadata: Metadata = {
   title: "PDF Document Scanner — Vanguard AV",
@@ -15,14 +10,7 @@ export const metadata: Metadata = {
 
 export default function PdfFeaturePage() {
   return (
-    <FeatureWorkspaceShell
-      slug="pdf"
-      readinessSlot={
-        <Suspense fallback={<SingleFeatureReadinessFallback />}>
-          <SingleFeatureReadinessStream slug="pdf" />
-        </Suspense>
-      }
-    >
+    <FeatureWorkspaceShell slug="pdf">
       <FileScannerWorkspace slug="pdf" />
     </FeatureWorkspaceShell>
   );

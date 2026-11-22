@@ -51,7 +51,7 @@ export async function POST(request: Request) {
 
   const filename = sanitizeDisplayFilename(fileEntry.name, "message.eml");
   const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-  const validation = validateEmailBytes(bytes);
+  const validation = validateEmailBytes(bytes, filename);
   if (!validation.ok) {
     return scanErrorResponse({
       status: validation.httpStatus,
