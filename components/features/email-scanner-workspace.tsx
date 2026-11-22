@@ -1,7 +1,21 @@
 "use client";
 
-import { AlertCircle, RefreshCw } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  AlertCircle,
+  Loader2,
+  Paperclip,
+  RefreshCw,
+  Upload,
+  X,
+} from "lucide-react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+} from "react";
 import { formatBytes, getFeatureDefinition } from "@/lib/features/catalog";
 import { inspectBrowserFileSignature } from "@/lib/features/file-signature";
 import type {
@@ -12,13 +26,94 @@ import type {
   ScanOutcome,
 } from "@/lib/features/types";
 import { CopyButton } from "./copy-button";
-import { FileDropzone } from "./file-dropzone";
-import { ScanResultPanel } from "./scan-result-panel";
-import { useTriageHandoff } from "./workspace-provider";
+import { EmailScanResult } from "./email-scan-result";
+import { useReadiness, useTriageHandoff } from "./workspace-provider";
+
+export function EmailReadinessInline() {
+  const {
+    snapshot,
+    isChecking,
+    isInitialLoading,
+    refreshError,
+    refreshHealth,
+  } = useReadiness();
+
+  const current = snapshot.features.email;
+  const isReady = !isInitialLoading && Boolean(current?.ready);
+  const isUnavailable = !isInitialLoading && !current?.ready;
+
+  return (
+    <div className="flex flex-col items-start gap-1 sm:items-end">
+      <div className="flex items-center gap-1">
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-xs"
+        >
+          {isInitialLoading && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-info bg-info/40 motion-safe:animate-pulse forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Checking…</span>
+            </>
+          )}
+          {isReady && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-transparent bg-positive forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Ready</span>
+            </>
+          )}
+          {isUnavailable && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rotate-45 border border-transparent bg-caution forced-colors:border-[CanvasText]"
+              />
+              <span className="font-medium text-caution">Unavailable</span>
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={isChecking}
+          aria-label="Refresh email scanner status"
+          title="Refresh email scanner status"
+          onClick={() => void refreshHealth()}
+          className="-me-3 inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface hover:text-foreground active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={`size-3.5 shrink-0 ${
+              isChecking ? "motion-safe:animate-spin motion-reduce:hidden" : ""
+            }`}
+            strokeWidth={1.75}
+          />
+        </button>
+      </div>
+
+      {refreshError && (
+        <p role="status" aria-live="polite" className="text-xs text-caution">
+          {refreshError}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function EmailScannerWorkspace() {
   const feature = getFeatureDefinition("email");
   const { claimHandoff } = useTriageHandoff();
+  const baseId = useId();
+  const fileInputId = `${baseId}-file`;
+  const helpId = `${baseId}-help`;
+  const errorId = `${baseId}-error`;
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
   const selectionSeqRef = useRef(0);
   const scanSeqRef = useRef(0);
@@ -26,6 +121,7 @@ export function EmailScannerWorkspace() {
   const handledHandoffIdRef = useRef<string | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [execState, setExecState] = useState<ExecutionState>("idle");
   const [fieldError, setFieldError] = useState<string>("");
   const [errorResponse, setErrorResponse] = useState<ScanErrorResponse | null>(
@@ -36,12 +132,43 @@ export function EmailScannerWorkspace() {
 
   const isSubmitting = execState === "submitting";
 
+  function openPicker() {
+    if (isSubmitting) return;
+    fileInputRef.current?.click();
+  }
+
+  function handleDragOver(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isSubmitting) setDragging(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLFormElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDragging(false);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (isSubmitting) return;
+    const dropped = event.dataTransfer.files?.[0] ?? null;
+    if (dropped) {
+      void handleFileSelect(dropped);
+    }
+  }
+
   async function handleFileSelect(next: File | null) {
     const seq = ++selectionSeqRef.current;
     setFile(next);
+    setOutcome(null);
     setErrorResponse(null);
+    setExecState("idle");
 
     if (!next) {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
       setFieldError("");
       setLiveStatus("Removed selected email file.");
       return;
@@ -83,7 +210,9 @@ export function EmailScannerWorkspace() {
     setFieldError("");
     setErrorResponse(null);
     setExecState("submitting");
-    setLiveStatus(`Validating and scanning ${targetFile.name} statically. Please wait...`);
+    setLiveStatus(
+      `Validating and scanning ${targetFile.name} statically. Please wait.`,
+    );
 
     const signature = await inspectBrowserFileSignature(targetFile, "email");
     if (seq !== scanSeqRef.current) return;
@@ -138,7 +267,7 @@ export function EmailScannerWorkspace() {
         status: "failed",
         code: "service_unavailable",
         message:
-          "Network connection was interrupted before the scan finished. Your selected .eml file is preserved — try again.",
+          "Connection was interrupted before the scan finished. Your selected .eml file is preserved — try again.",
         retryable: true,
         diagnosticId: "network-interrupted",
       };
@@ -194,6 +323,9 @@ export function EmailScannerWorkspace() {
 
   function handleReset() {
     selectionSeqRef.current += 1;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
     setFile(null);
     setOutcome(null);
     setErrorResponse(null);
@@ -203,7 +335,7 @@ export function EmailScannerWorkspace() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {liveStatus}
       </p>
@@ -211,46 +343,151 @@ export function EmailScannerWorkspace() {
       <form
         id="features-email-workbench"
         onSubmit={handleSubmit}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         noValidate
-        className={`workspace-panel divide-y divide-outline overflow-hidden rounded-2xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
-          fieldError ? "border-danger" : "border-outline"
+        className={`space-y-3 rounded-xl motion-safe:transition-[outline-color] motion-safe:duration-150 ${
+          dragging ? "outline-2 outline-dashed outline-accent outline-offset-8" : ""
         }`}
       >
-        <FileDropzone
-          label="Raw email message (.eml)"
-          formatLabel={feature.formatLabel}
-          limitLabel={feature.limitLabel}
-          acceptedExtensions={feature.acceptedExtensions}
-          file={file}
+        <label htmlFor={fileInputId} className="sr-only">
+          Email message (.eml)
+        </label>
+        <input
+          ref={fileInputRef}
+          id={fileInputId}
+          type="file"
+          tabIndex={-1}
+          aria-hidden="true"
+          accept={feature.acceptedExtensions.join(",")}
           disabled={isSubmitting}
-          submitting={isSubmitting}
-          error={fieldError}
-          submitId="features-email-submit"
-          submitLabel={isSubmitting ? "Scanning..." : "Scan email"}
-          emptyPrompt={
-            <>
-              Drop a raw <span className="font-mono text-foreground/90">.eml</span>{" "}
-              file here, or choose one from your device.
-            </>
-          }
-          onFileSelect={(next) => {
-            void handleFileSelect(next);
+          className="sr-only"
+          onChange={(event) => {
+            const chosen = event.currentTarget.files?.[0] ?? null;
+            event.currentTarget.value = "";
+            void handleFileSelect(chosen);
           }}
         />
 
-        {isSubmitting && (
-          <div
-            aria-busy="true"
-            className="px-4 py-2.5 text-xs text-muted-foreground sm:px-5"
-          >
-            Inspecting email headers, body text, links, and attachments statically without opening links or files...
+        <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-muted-foreground">
+          <span className="font-medium">Email message (.eml)</span>
+          <span className="font-mono tabular-nums">Up to 5 MiB</span>
+        </div>
+
+        <div
+          className={`flex flex-col gap-3 rounded-xl border bg-transparent px-4 py-3 motion-safe:transition-colors motion-safe:duration-150 sm:flex-row sm:items-center sm:justify-between ${
+            fieldError ? "border-danger" : "border-border-control"
+          }`}
+        >
+          <div className="min-w-0 flex-1">
+            {file ? (
+              <div className="flex min-w-0 items-center gap-2 text-sm">
+                <Paperclip
+                  aria-hidden="true"
+                  className="size-4 shrink-0 text-accent"
+                  strokeWidth={1.75}
+                />
+                <span
+                  className="truncate font-mono text-foreground"
+                  title={file.name}
+                >
+                  {file.name}
+                </span>
+                <span
+                  id={helpId}
+                  className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground"
+                >
+                  {formatBytes(file.size)}
+                </span>
+                <CopyButton
+                  value={file.name}
+                  ariaLabel="Copy selected email filename"
+                />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <Upload
+                  aria-hidden="true"
+                  className="size-4 shrink-0 text-muted-foreground"
+                  strokeWidth={1.75}
+                />
+                <p id={helpId}>
+                  Drop a <span className="font-mono text-foreground/90">.eml</span>{" "}
+                  file here, or choose one.
+                </p>
+              </div>
+            )}
           </div>
+
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            {file && (
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={() => void handleFileSelect(null)}
+                aria-label="Remove selected email file"
+                className="inline-flex min-h-12 min-w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+              >
+                <X aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={isSubmitting}
+              aria-describedby={fieldError ? `${helpId} ${errorId}` : helpId}
+              onClick={openPicker}
+              className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50 sm:flex-none"
+            >
+              {file ? "Change" : "Choose file"}
+            </button>
+
+            <button
+              id="features-email-submit"
+              type="submit"
+              disabled={isSubmitting}
+              className="inline-flex min-h-12 flex-[2_1_0%] cursor-pointer items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground sm:flex-none"
+            >
+              {isSubmitting && (
+                <Loader2
+                  aria-hidden="true"
+                  className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
+                  strokeWidth={1.75}
+                />
+              )}
+              <span>{isSubmitting ? "Scanning…" : "Scan email"}</span>
+            </button>
+          </div>
+        </div>
+
+        {fieldError && (
+          <div className="rounded-xl bg-danger-bg/45 px-3.5 py-2.5">
+            <p
+              id={errorId}
+              role="alert"
+              className="flex items-start gap-2 text-xs font-medium text-danger"
+            >
+              <AlertCircle
+                aria-hidden="true"
+                className="mt-0.5 size-3.5 shrink-0"
+                strokeWidth={1.75}
+              />
+              <span className="break-words">{fieldError}</span>
+            </p>
+          </div>
+        )}
+
+        {isSubmitting && (
+          <p aria-busy="true" className="text-xs text-muted-foreground">
+            Inspecting headers, body text, links, and attachments statically…
+          </p>
         )}
 
         {errorResponse && (
           <div
             role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 bg-danger-bg/20 px-4 py-2.5 text-xs sm:px-5"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-danger-bg/45 px-3.5 py-2.5 text-xs"
           >
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AlertCircle
@@ -258,7 +495,7 @@ export function EmailScannerWorkspace() {
                 className="size-3.5 shrink-0 text-danger"
                 strokeWidth={1.75}
               />
-              <span className="font-medium text-foreground break-words">
+              <span className="break-words font-medium text-foreground">
                 {errorResponse.message}
               </span>
               <span className="font-mono text-muted-foreground">
@@ -277,7 +514,11 @@ export function EmailScannerWorkspace() {
                 onClick={() => void runScan()}
                 className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-hover active:bg-surface-selected"
               >
-                <RefreshCw aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
+                <RefreshCw
+                  aria-hidden="true"
+                  className="size-3.5"
+                  strokeWidth={1.75}
+                />
                 <span>Retry</span>
               </button>
             )}
@@ -286,7 +527,7 @@ export function EmailScannerWorkspace() {
       </form>
 
       {outcome && !isSubmitting && (
-        <ScanResultPanel outcome={outcome} onReset={handleReset} />
+        <EmailScanResult outcome={outcome} onReset={handleReset} />
       )}
     </div>
   );

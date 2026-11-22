@@ -1,6 +1,14 @@
 "use client";
 
-import { AlertCircle, Loader2, Paperclip, RefreshCw, X } from "lucide-react";
+import {
+  AlertCircle,
+  List,
+  Loader2,
+  MessageSquare,
+  Paperclip,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import {
   useEffect,
   useId,
@@ -25,8 +33,8 @@ import type {
   ScanOutcome,
 } from "@/lib/features/types";
 import { CopyButton } from "./copy-button";
-import { ScanResultPanel } from "./scan-result-panel";
-import { useTriageHandoff } from "./workspace-provider";
+import { SmsScanResult } from "./sms-scan-result";
+import { useReadiness, useTriageHandoff } from "./workspace-provider";
 
 type SmsMode = "single" | "batch";
 
@@ -35,6 +43,90 @@ interface RunScanOverrides {
   singleText?: string;
   batchText?: string;
   batchFile?: File | null;
+}
+
+function parseBatchLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function SmsReadinessInline() {
+  const {
+    snapshot,
+    isChecking,
+    isInitialLoading,
+    refreshError,
+    refreshHealth,
+  } = useReadiness();
+
+  const current = snapshot.features.sms;
+  const isReady = !isInitialLoading && Boolean(current?.ready);
+  const isUnavailable = !isInitialLoading && !current?.ready;
+
+  return (
+    <div className="flex flex-col items-start gap-1 sm:items-end">
+      <div className="flex items-center gap-1">
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-xs"
+        >
+          {isInitialLoading && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-info bg-info/40 motion-safe:animate-pulse forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Checking…</span>
+            </>
+          )}
+          {isReady && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-transparent bg-positive forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Ready</span>
+            </>
+          )}
+          {isUnavailable && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rotate-45 border border-transparent bg-caution forced-colors:border-[CanvasText]"
+              />
+              <span className="font-medium text-caution">Unavailable</span>
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={isChecking}
+          aria-label="Refresh SMS scanner status"
+          title="Refresh SMS scanner status"
+          onClick={() => void refreshHealth()}
+          className="-me-3 inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface hover:text-foreground active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={`size-3.5 shrink-0 ${
+              isChecking ? "motion-safe:animate-spin motion-reduce:hidden" : ""
+            }`}
+            strokeWidth={1.75}
+          />
+        </button>
+      </div>
+
+      {refreshError && (
+        <p role="status" aria-live="polite" className="text-xs text-caution">
+          {refreshError}
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function SmsScannerWorkspace() {
@@ -67,11 +159,14 @@ export function SmsScannerWorkspace() {
   const [liveStatus, setLiveStatus] = useState("");
 
   const isSubmitting = execState === "submitting";
+  const parsedBatchLines = parseBatchLines(batchText);
+  const showSingleCounter = singleText.length > 500;
 
-  const parsedBatchLines = batchText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  function switchMode(next: SmsMode) {
+    setMode(next);
+    setFieldError("");
+    setErrorResponse(null);
+  }
 
   function selectBatchFile(next: File | null) {
     setBatchFile(next);
@@ -93,8 +188,10 @@ export function SmsScannerWorkspace() {
       fileInputRef.current.value = "";
     }
     setBatchFile(null);
+    setOutcome(null);
     setFieldError("");
     setErrorResponse(null);
+    setExecState("idle");
     setLiveStatus("Removed batch file. Ready for pasted batch messages.");
   }
 
@@ -129,10 +226,7 @@ export function SmsScannerWorkspace() {
       overrides && "batchFile" in overrides
         ? (overrides.batchFile ?? null)
         : batchFile;
-    const targetBatchLines = targetBatchText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const targetBatchLines = parseBatchLines(targetBatchText);
 
     if (targetMode === "single") {
       const trimmed = targetSingleText.trim();
@@ -154,16 +248,14 @@ export function SmsScannerWorkspace() {
       }
     } else if (targetBatchFile) {
       if (targetBatchFile.size === 0) {
-        setFieldError(
-          "The selected batch file is empty (0 bytes). Choose a non-empty file.",
-        );
+        setFieldError("The selected file is empty (0 bytes).");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Selected batch file is empty.");
         return;
       }
       if (targetBatchFile.size > FIVE_MIB) {
-        setFieldError("SMS batch import files must be 5 MiB or smaller.");
+        setFieldError("Batch files must be 5 MiB or smaller.");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Selected batch file exceeds the 5 MiB limit.");
@@ -171,9 +263,7 @@ export function SmsScannerWorkspace() {
       }
     } else {
       if (targetBatchLines.length === 0) {
-        setFieldError(
-          "Enter at least one SMS message (one per line) or import a batch file.",
-        );
+        setFieldError("Enter at least 1 SMS message or import a batch file.");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Provide batch messages or import a batch file.");
@@ -181,7 +271,7 @@ export function SmsScannerWorkspace() {
       }
       if (targetBatchLines.length > SMS_MAX_BATCH_ITEMS) {
         setFieldError(
-          `Batch scans accept at most ${SMS_MAX_BATCH_ITEMS} messages at a time (currently ${targetBatchLines.length}).`,
+          `Batch scans accept up to ${SMS_MAX_BATCH_ITEMS} messages at a time (currently ${targetBatchLines.length}).`,
         );
         setErrorResponse(null);
         setExecState("idle");
@@ -217,8 +307,8 @@ export function SmsScannerWorkspace() {
     setExecState("submitting");
     setLiveStatus(
       targetMode === "batch"
-        ? "Scanning SMS batch statically. Please wait..."
-        : "Scanning SMS message statically. Please wait...",
+        ? "Analyzing SMS batch offline. Please wait."
+        : "Analyzing SMS message offline. Please wait.",
     );
 
     try {
@@ -293,7 +383,7 @@ export function SmsScannerWorkspace() {
         status: "failed",
         code: "service_unavailable",
         message:
-          "Network connection was interrupted before the scan finished. Your SMS input is preserved — try again.",
+          "Connection was interrupted before the scan finished. Your SMS input is kept — try again.",
         retryable: true,
         diagnosticId: "network-interrupted",
       };
@@ -322,9 +412,14 @@ export function SmsScannerWorkspace() {
       setMode("batch");
       setBatchText(handoff.text);
       if (handoff.autoSubmit) {
-        void runScan({ mode: "batch", batchText: handoff.text, batchFile: null }, true);
+        void runScan(
+          { mode: "batch", batchText: handoff.text, batchFile: null },
+          true,
+        );
       } else {
-        setLiveStatus("Loaded your SMS list into batch mode. Review and submit when ready.");
+        setLiveStatus(
+          "Loaded your SMS list into batch mode. Review and submit when ready.",
+        );
       }
       return;
     }
@@ -332,7 +427,10 @@ export function SmsScannerWorkspace() {
     setMode("single");
     setSingleText(handoff.text);
     if (handoff.autoSubmit) {
-      void runScan({ mode: "single", singleText: handoff.text, batchFile: null }, true);
+      void runScan(
+        { mode: "single", singleText: handoff.text, batchFile: null },
+        true,
+      );
     }
   }
 
@@ -381,8 +479,32 @@ export function SmsScannerWorkspace() {
     setLiveStatus("Cleared previous scan. Ready for a new SMS check.");
   }
 
+  const submitButton = (
+    <button
+      id="features-sms-submit"
+      type="submit"
+      disabled={isSubmitting}
+      className="inline-flex min-h-12 flex-[2_1_0%] cursor-pointer items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground sm:flex-none"
+    >
+      {isSubmitting && (
+        <Loader2
+          aria-hidden="true"
+          className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
+          strokeWidth={1.75}
+        />
+      )}
+      <span>
+        {isSubmitting
+          ? "Scanning…"
+          : mode === "batch"
+            ? "Scan batch"
+            : "Scan SMS"}
+      </span>
+    </button>
+  );
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {liveStatus}
       </p>
@@ -394,18 +516,16 @@ export function SmsScannerWorkspace() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         noValidate
-        className={`workspace-panel divide-y divide-outline overflow-hidden rounded-2xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
-          fieldError
-            ? "border-danger"
-            : dragging
-              ? "border-accent bg-surface-selected/35"
-              : "border-outline"
+        className={`space-y-3 rounded-xl motion-safe:transition-[outline-color] motion-safe:duration-150 ${
+          dragging ? "outline-2 outline-dashed outline-accent outline-offset-8" : ""
         }`}
       >
         <input
           ref={fileInputRef}
           id={fileInputId}
           type="file"
+          tabIndex={-1}
+          aria-hidden="true"
           accept={feature.acceptedExtensions.join(",")}
           disabled={isSubmitting}
           className="sr-only"
@@ -416,249 +536,302 @@ export function SmsScannerWorkspace() {
           }}
         />
 
-        {/* Top hairline bar: mode tabs + live counter */}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 sm:px-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="flex items-baseline gap-2">
+            {mode === "single" ? (
+              <>
+                <label
+                  htmlFor={singleInputId}
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  SMS message
+                </label>
+                {showSingleCounter && (
+                  <span
+                    className={`font-mono text-xs tabular-nums ${
+                      singleText.length > SMS_MAX_TEXT_LENGTH
+                        ? "text-danger"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {singleText.length.toLocaleString()} /{" "}
+                    {SMS_MAX_TEXT_LENGTH.toLocaleString()}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                {batchFile ? (
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Batch file
+                  </span>
+                ) : (
+                  <label
+                    htmlFor={batchInputId}
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    Messages, one per line
+                  </label>
+                )}
+
+                {!batchFile && parsedBatchLines.length > 0 && (
+                  <span
+                    className={`font-mono text-xs tabular-nums ${
+                      parsedBatchLines.length > SMS_MAX_BATCH_ITEMS
+                        ? "text-danger"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {parsedBatchLines.length} / {SMS_MAX_BATCH_ITEMS}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
           <div
             role="group"
             aria-label="Inspection mode"
-            className="flex flex-wrap items-center gap-5"
+            className="inline-flex items-center gap-0.5 rounded-xl border border-border-control/70 bg-canvas p-0.5"
           >
             <button
               type="button"
-              disabled={isSubmitting}
               aria-pressed={mode === "single"}
-              onClick={() => {
-                setMode("single");
-                setFieldError("");
-                setErrorResponse(null);
-              }}
-              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              disabled={isSubmitting}
+              onClick={() => switchMode("single")}
+              className={`inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] px-3 text-xs font-medium motion-safe:transition-colors motion-safe:duration-150 disabled:cursor-default disabled:opacity-50 ${
                 mode === "single"
-                  ? "workspace-nav-active border-accent text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                  ? "workspace-nav-active bg-surface-hover text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Single message
+              <MessageSquare
+                aria-hidden="true"
+                className={`size-3.5 shrink-0 ${
+                  mode === "single" ? "text-accent" : ""
+                }`}
+                strokeWidth={1.75}
+              />
+              <span>Single</span>
             </button>
 
             <button
               type="button"
-              disabled={isSubmitting}
               aria-pressed={mode === "batch"}
-              onClick={() => {
-                setMode("batch");
-                setFieldError("");
-                setErrorResponse(null);
-              }}
-              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              disabled={isSubmitting}
+              onClick={() => switchMode("batch")}
+              className={`inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] px-3 text-xs font-medium motion-safe:transition-colors motion-safe:duration-150 disabled:cursor-default disabled:opacity-50 ${
                 mode === "batch"
-                  ? "workspace-nav-active border-accent text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                  ? "workspace-nav-active bg-surface-hover text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Batch (up to {SMS_MAX_BATCH_ITEMS})
+              <List
+                aria-hidden="true"
+                className={`size-3.5 shrink-0 ${
+                  mode === "batch" ? "text-accent" : ""
+                }`}
+                strokeWidth={1.75}
+              />
+              <span>Batch</span>
             </button>
           </div>
-
-          <span className="py-2 font-mono text-xs text-muted-foreground tabular-nums">
-            {mode === "single"
-              ? `${singleText.length.toLocaleString()} / ${SMS_MAX_TEXT_LENGTH.toLocaleString()}`
-              : batchFile
-                ? formatBytes(batchFile.size)
-                : `${parsedBatchLines.length} / ${SMS_MAX_BATCH_ITEMS}`}
-          </span>
         </div>
 
-        {/* Main input body */}
-        <div className="px-5 py-5 sm:px-6">
-          {mode === "single" ? (
-            <div className="space-y-1.5">
-              <label
-                htmlFor={singleInputId}
-                className="text-xs font-medium text-muted-foreground"
-              >
-                SMS message
-              </label>
-              <textarea
-                id={singleInputId}
-                dir="auto"
-                rows={4}
-                value={singleText}
-                disabled={isSubmitting}
-                maxLength={SMS_MAX_TEXT_LENGTH + 100}
-                aria-invalid={fieldError ? true : undefined}
-                aria-describedby={fieldError ? errorId : undefined}
-                placeholder="Paste the SMS text message to inspect..."
-                onKeyDown={handleTextareaKeyDown}
-                onChange={(event) => {
-                  setSingleText(event.currentTarget.value);
-                  if (fieldError) setFieldError("");
-                }}
-                className={`min-h-28 w-full rounded-lg border bg-canvas px-3.5 py-2.5 text-sm leading-6 text-foreground placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
-                  fieldError ? "border-danger" : "border-border-control"
-                }`}
-              />
-            </div>
-          ) : batchFile ? (
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-center gap-2 text-sm">
-                <Paperclip
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-accent"
-                  strokeWidth={1.75}
-                />
-                <span
-                  className="truncate font-mono text-foreground"
-                  title={batchFile.name}
-                >
-                  {batchFile.name}
-                </span>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
-                  · {formatBytes(batchFile.size)}
-                </span>
-                <CopyButton
-                  value={batchFile.name}
-                  ariaLabel="Copy selected batch filename"
-                />
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={openFilePicker}
-                  className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-                >
-                  Change file
-                </button>
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={clearBatchFile}
-                  aria-label="Remove selected batch file"
-                  className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg border border-border-control bg-canvas text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
-                >
-                  <X aria-hidden="true" className="size-4" strokeWidth={1.75} />
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <label
-                htmlFor={batchInputId}
-                className="text-xs font-medium text-muted-foreground"
-              >
-                Batch messages (one per line)
-              </label>
-              <textarea
-                id={batchInputId}
-                dir="auto"
-                rows={4}
-                value={batchText}
-                disabled={isSubmitting}
-                aria-invalid={fieldError ? true : undefined}
-                aria-describedby={fieldError ? errorId : undefined}
-                placeholder={
-                  "Paste one SMS message per line, or drop a .txt, .csv, .json, or .jsonl file..."
-                }
-                onKeyDown={handleTextareaKeyDown}
-                onChange={(event) => {
-                  setBatchText(event.currentTarget.value);
-                  if (fieldError) setFieldError("");
-                }}
-                className={`min-h-28 w-full rounded-lg border bg-canvas px-3.5 py-2.5 text-sm leading-6 text-foreground placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
-                  fieldError ? "border-danger" : "border-border-control"
-                }`}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Footer action bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
-          <div className="flex flex-wrap items-center gap-2">
-            {mode === "batch" && !batchFile ? (
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={openFilePicker}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-              >
-                Import file
-              </button>
-            ) : (
-              <p className="max-w-[55ch] text-xs text-muted-foreground">
-                Offline text analysis — extracted links remain non-clickable.
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {((mode === "single" && singleText.length > 0) ||
-              (mode === "batch" && !batchFile && batchText.length > 0)) && (
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => {
-                  if (mode === "single") {
-                    setSingleText("");
-                  } else {
-                    setBatchText("");
-                  }
-                  setFieldError("");
-                  setErrorResponse(null);
-                }}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-              >
-                Clear
-              </button>
-            )}
-
-            <button
-              id="features-sms-submit"
-              type="submit"
+        {mode === "single" ? (
+          <div className="space-y-3">
+            <textarea
+              id={singleInputId}
+              dir="auto"
+              rows={3}
+              value={singleText}
               disabled={isSubmitting}
-              className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
-            >
-              {isSubmitting && (
-                <Loader2
-                  aria-hidden="true"
-                  className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
-                  strokeWidth={1.75}
-                />
+              maxLength={SMS_MAX_TEXT_LENGTH + 100}
+              aria-invalid={fieldError ? true : undefined}
+              aria-describedby={fieldError ? errorId : undefined}
+              placeholder="Paste the SMS text message to inspect"
+              onKeyDown={handleTextareaKeyDown}
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                setSingleText(next);
+                if (fieldError) setFieldError("");
+                if (next.trim().length === 0) {
+                  setOutcome(null);
+                  setErrorResponse(null);
+                  setExecState("idle");
+                }
+              }}
+              className={`min-h-28 w-full rounded-xl border bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                fieldError ? "border-danger" : "border-border-control"
+              }`}
+            />
+
+            <div className="flex w-full items-center justify-end gap-2">
+              {singleText.length > 0 && (
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => {
+                    setSingleText("");
+                    setOutcome(null);
+                    setFieldError("");
+                    setErrorResponse(null);
+                    setExecState("idle");
+                  }}
+                  className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-4 text-sm font-medium text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50 sm:flex-none"
+                >
+                  Clear
+                </button>
               )}
-              <span>
-                {isSubmitting
-                  ? "Scanning..."
-                  : mode === "batch"
-                    ? "Scan batch"
-                    : "Scan SMS"}
-              </span>
-            </button>
+              {submitButton}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="space-y-3">
+            {batchFile ? (
+              <div className="flex flex-col gap-3 rounded-xl border border-border-control px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2 text-sm">
+                  <Paperclip
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-accent"
+                    strokeWidth={1.75}
+                  />
+                  <span
+                    className="truncate font-mono text-foreground"
+                    title={batchFile.name}
+                  >
+                    {batchFile.name}
+                  </span>
+                  <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+                    {formatBytes(batchFile.size)}
+                  </span>
+                  <CopyButton
+                    value={batchFile.name}
+                    ariaLabel="Copy selected batch filename"
+                  />
+                </div>
+
+                <div className="flex w-full items-center gap-2 sm:w-auto">
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={clearBatchFile}
+                    aria-label="Remove selected batch file"
+                    className="inline-flex min-h-12 min-w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                  >
+                    <X
+                      aria-hidden="true"
+                      className="size-4 shrink-0"
+                      strokeWidth={1.75}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={openFilePicker}
+                    className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50 sm:flex-none"
+                  >
+                    Change
+                  </button>
+                  {submitButton}
+                </div>
+              </div>
+            ) : (
+              <>
+                <textarea
+                  id={batchInputId}
+                  dir="auto"
+                  rows={4}
+                  value={batchText}
+                  disabled={isSubmitting}
+                  aria-invalid={fieldError ? true : undefined}
+                  aria-describedby={fieldError ? errorId : undefined}
+                  placeholder="Paste one SMS message per line, or drop a .txt, .csv, .json, or .jsonl file"
+                  onKeyDown={handleTextareaKeyDown}
+                  onChange={(event) => {
+                    const next = event.currentTarget.value;
+                    setBatchText(next);
+                    if (fieldError) setFieldError("");
+                    if (next.trim().length === 0) {
+                      setOutcome(null);
+                      setErrorResponse(null);
+                      setExecState("idle");
+                    }
+                  }}
+                  className={`min-h-32 w-full rounded-xl border bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                    fieldError ? "border-danger" : "border-border-control"
+                  }`}
+                />
+
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={openFilePicker}
+                    className="inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50 sm:w-auto"
+                  >
+                    <Paperclip
+                      aria-hidden="true"
+                      className="size-3.5 shrink-0 text-muted-foreground"
+                      strokeWidth={1.75}
+                    />
+                    <span>Import file</span>
+                  </button>
+
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    {batchText.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isSubmitting}
+                        onClick={() => {
+                          setBatchText("");
+                          setOutcome(null);
+                          setFieldError("");
+                          setErrorResponse(null);
+                          setExecState("idle");
+                        }}
+                        className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-4 text-sm font-medium text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50 sm:flex-none"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {submitButton}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {fieldError && (
-          <div className="bg-danger-bg/20 px-4 py-2.5 sm:px-5">
-            <p id={errorId} role="alert" className="text-xs font-medium text-danger break-words">
-              {fieldError}
+          <div className="rounded-xl bg-danger-bg/45 px-3.5 py-2.5">
+            <p
+              id={errorId}
+              role="alert"
+              className="flex items-start gap-2 text-xs font-medium text-danger"
+            >
+              <AlertCircle
+                aria-hidden="true"
+                className="mt-0.5 size-3.5 shrink-0"
+                strokeWidth={1.75}
+              />
+              <span className="break-words">{fieldError}</span>
             </p>
           </div>
         )}
 
         {isSubmitting && (
-          <div
-            aria-busy="true"
-            className="px-4 py-2.5 text-xs text-muted-foreground sm:px-5"
-          >
-            Inspecting SMS text, extracted links, callback numbers, and obfuscation signals statically...
-          </div>
+          <p aria-busy="true" className="text-xs text-muted-foreground">
+            {mode === "batch"
+              ? "Analyzing SMS batch offline. Please wait…"
+              : "Analyzing SMS message offline. Please wait…"}
+          </p>
         )}
 
         {errorResponse && (
           <div
             role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 bg-danger-bg/20 px-4 py-2.5 text-xs sm:px-5"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-danger-bg/45 px-3.5 py-2.5 text-xs"
           >
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AlertCircle
@@ -666,7 +839,7 @@ export function SmsScannerWorkspace() {
                 className="size-3.5 shrink-0 text-danger"
                 strokeWidth={1.75}
               />
-              <span className="font-medium text-foreground break-words">
+              <span className="break-words font-medium text-foreground">
                 {errorResponse.message}
               </span>
               <span className="font-mono text-muted-foreground">
@@ -685,7 +858,11 @@ export function SmsScannerWorkspace() {
                 onClick={() => void runScan()}
                 className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-hover active:bg-surface-selected"
               >
-                <RefreshCw aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
+                <RefreshCw
+                  aria-hidden="true"
+                  className="size-3.5"
+                  strokeWidth={1.75}
+                />
                 <span>Retry</span>
               </button>
             )}
@@ -694,7 +871,7 @@ export function SmsScannerWorkspace() {
       </form>
 
       {outcome && !isSubmitting && (
-        <ScanResultPanel outcome={outcome} onReset={handleReset} />
+        <SmsScanResult outcome={outcome} onReset={handleReset} />
       )}
     </div>
   );

@@ -345,7 +345,7 @@ export function mapOfficeResponse(
     verdict === "malicious"
       ? [
           "Do not open this document or enable macros / external content.",
-          "Inspect the threat attribution and reason codes in Technical Evidence below.",
+          "Inspect the threat attribution and reason codes in Details below.",
           "Quarantine the file and verify the document's origin with the sender through another channel.",
         ]
       : verdict === "review"
