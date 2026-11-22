@@ -1051,6 +1051,7 @@ function mapUrlItem(raw: unknown, index: number): UrlItemOutcome {
   const isMalicious =
     asBoolean(obj.is_malicious) ||
     asString(obj.prediction)?.toLowerCase() === "malicious" ||
+    asString(obj.label)?.toLowerCase() === "malicious" ||
     asString(obj.verdict)?.toLowerCase() === "malicious";
 
   const maliciousProbability =
@@ -1065,34 +1066,9 @@ function mapUrlItem(raw: unknown, index: number): UrlItemOutcome {
       ? Math.max(0, Math.min(1, 1 - maliciousProbability))
       : null);
 
-  const rawVerdict = asString(obj.verdict)?.toLowerCase() ?? "";
-  const rawIsUncertain = asBoolean(obj.is_uncertain);
-  const isNonCompleteStatus =
-    status === "unsupported" || status === "unavailable";
-
-  let verdict: AdvisoryVerdict;
-  if (isNonCompleteStatus) {
-    verdict = "review";
-  } else if (isMalicious) {
-    verdict = "malicious";
-  } else if (rawIsUncertain || rawVerdict === "review") {
-    verdict = "review";
-  } else {
-    verdict = "benign";
-  }
-
-  const isUncertain = isNonCompleteStatus || rawIsUncertain || verdict === "review";
-  const rawFactors = asStringArray(verdictDetails.uncertainty_factors);
-  const uncertaintyFactors =
-    rawFactors.length > 0
-      ? rawFactors
-      : status === "unsupported"
-        ? [
-            "URL format or scheme is outside supported HTTP(S) and domain coverage.",
-          ]
-        : status === "unavailable"
-          ? ["URL scoring was unavailable for this item."]
-          : [];
+  const verdict: AdvisoryVerdict = isMalicious ? "malicious" : "benign";
+  const isUncertain = false;
+  const uncertaintyFactors: string[] = [];
 
   const parsedUrl: UrlParsedComponentSummary | null =
     Object.keys(parsedRaw).length > 0
@@ -1172,15 +1148,11 @@ export function mapUrlSingleResponse(raw: unknown): ScanOutcome {
   if (item.status === "unsupported") {
     coverage = "unsupported";
     coverageDetail =
-      "This link uses an unsupported scheme or format outside HTTP(S) and domain analysis — review manually.";
+      "This link uses an unsupported scheme or format outside HTTP(S) and domain analysis.";
   } else if (item.status === "unavailable") {
     coverage = "unreadable";
     coverageDetail =
-      "The URL scorer could not complete analysis on this destination — review manually before opening.";
-  } else if (item.isUncertain) {
-    coverage = "ambiguous";
-    coverageDetail =
-      "URL signals fell near the decision boundary — verify the domain and sender before opening.";
+      "The URL scorer could not complete full analysis on this destination.";
   }
 
   const hostNote = item.parsedUrl?.isIp
@@ -1192,26 +1164,18 @@ export function mapUrlSingleResponse(raw: unknown): ScanOutcome {
   const summary =
     item.verdict === "malicious"
       ? `Static URL inspection flagged phishing or malware indicators${hostNote}.`
-      : item.verdict === "review"
-        ? `Static URL inspection requires human review (${coverageLabelFor(coverage).toLowerCase()})${hostNote}.`
-        : `Static URL inspection found no phishing or malware indicators${hostNote}.`;
+      : `Static URL inspection found no phishing or malware indicators${hostNote}.`;
 
   const recommendedActions =
     item.verdict === "malicious"
       ? [
           "Do not open this link, sign in, or download files from this destination.",
-          "Inspect the host and path breakdown and pattern scores in Technical Evidence below (all rendered safely as non-clickable text).",
-          "If this link arrived in an email or text message, report the message and navigate to the service directly via a known bookmark.",
+          "Inspect the host, path, and model breakdown in Details below (rendered as non-clickable text).",
         ]
-      : item.verdict === "review"
-        ? [
-            "Do not treat an unsupported, unavailable, or uncertain URL scan as safe.",
-            "Verify the domain spelling and sender independently before visiting this destination.",
-          ]
-        : [
-            "No phishing or malware indicators were flagged by static URL analysis.",
-            "Always confirm the domain spelling and HTTPS certificate before entering credentials on unfamiliar pages.",
-          ];
+      : [
+          "No phishing or malware indicators were flagged by static URL analysis.",
+          "Confirm the domain spelling and HTTPS certificate before entering credentials on unfamiliar pages.",
+        ];
 
   return {
     status: "completed",
@@ -1221,15 +1185,15 @@ export function mapUrlSingleResponse(raw: unknown): ScanOutcome {
     inputLabel: item.url || "Single URL",
     inputSizeBytes: null,
     verdict: item.verdict,
-    verdictLabel: verdictLabelFor(item.verdict, "Phishing / malicious URL"),
+    verdictLabel: item.verdict === "malicious" ? "Malicious" : "Benign",
     coverage,
     coverageLabel: coverageLabelFor(coverage),
     coverageDetail,
     riskTier: item.riskTier,
     riskScore: item.maliciousProbability,
     confidence: item.confidence,
-    isUncertain: item.isUncertain,
-    uncertaintyReasons: item.uncertaintyFactors,
+    isUncertain: false,
+    uncertaintyReasons: [],
     advisoryNotice: ADVISORY_NOTICE,
     summary,
     recommendedActions,
@@ -1266,34 +1230,23 @@ export function mapUrlBatchResponse(
   const scoredCount = scoredItems.length;
   const unsupportedCount = items.filter((i) => i.status === "unsupported").length;
   const unavailableCount = items.filter((i) => i.status === "unavailable").length;
-  const maliciousCount = scoredItems.filter((i) => i.verdict === "malicious").length;
-  const uncertainCount = scoredItems.filter((i) => i.verdict === "review").length;
-  const benignCount = scoredItems.filter((i) => i.verdict === "benign").length;
-  const reviewTotalCount = uncertainCount + unsupportedCount + unavailableCount;
+  const maliciousCount = items.filter((i) => i.verdict === "malicious").length;
+  const uncertainCount = 0;
+  const benignCount = items.filter((i) => i.verdict === "benign").length;
 
   const hasEmptyResults = items.length === 0;
-  const verdict: AdvisoryVerdict = hasEmptyResults
-    ? "review"
-    : maliciousCount > 0
-      ? "malicious"
-      : reviewTotalCount > 0
-        ? "review"
-        : "benign";
+  const verdict: AdvisoryVerdict = maliciousCount > 0 ? "malicious" : "benign";
 
   const coverage: CoverageStatus = hasEmptyResults
     ? "unreadable"
     : unsupportedCount > 0 || unavailableCount > 0
       ? "partial"
-      : uncertainCount > 0
-        ? "ambiguous"
-        : "complete";
+      : "complete";
 
   const coverageDetail =
     unsupportedCount + unavailableCount > 0
-      ? `${unsupportedCount + unavailableCount} URL(s) could not be scored completely and require manual review.`
-      : uncertainCount > 0
-        ? `${uncertainCount} URL(s) scored inside the uncertainty band and should be reviewed manually.`
-        : null;
+      ? `${unsupportedCount + unavailableCount} URL(s) could not be scored completely.`
+      : null;
 
   const maxMaliciousProb = items.reduce<number | null>((acc, item) => {
     if (item.maliciousProbability === null) return acc;
@@ -1304,10 +1257,8 @@ export function mapUrlBatchResponse(
 
   const summary =
     maliciousCount > 0
-      ? `Flagged ${maliciousCount} of ${totalUrls} URLs for phishing or malware (${reviewTotalCount} need review, ${benignCount} benign).`
-      : reviewTotalCount > 0
-        ? `No confirmed malicious URLs, but ${reviewTotalCount} of ${totalUrls} URLs need human review (${benignCount} benign).`
-        : `All ${totalUrls} URLs in this batch showed no phishing or malware indicators.`;
+      ? `Flagged ${maliciousCount} of ${totalUrls} URLs as malicious (${benignCount} benign).`
+      : `All ${totalUrls} URLs in this batch showed no phishing or malware indicators.`;
 
   const firstItemRaw = resultsRaw[0] ? asRecord(resultsRaw[0]) : {};
   const firstVerdictDetails = asRecord(firstItemRaw.verdict_details);
@@ -1320,38 +1271,26 @@ export function mapUrlBatchResponse(
     inputLabel: meta.label ?? `URL batch (${totalUrls} URLs)`,
     inputSizeBytes: null,
     verdict,
-    verdictLabel:
-      verdict === "malicious"
-        ? `${maliciousCount} flagged in batch`
-        : verdict === "review"
-          ? `${reviewTotalCount} need review`
-          : "Batch clean",
+    verdictLabel: verdict === "malicious" ? "Malicious" : "Benign",
     coverage,
     coverageLabel: coverageLabelFor(coverage),
     coverageDetail,
     riskTier: deriveRiskTierFromScore(maxMaliciousProb, verdict),
     riskScore: maxMaliciousProb,
     confidence: null,
-    isUncertain: reviewTotalCount > 0,
-    uncertaintyReasons:
-      reviewTotalCount > 0
-        ? [`${reviewTotalCount} of ${totalUrls} URLs require manual review.`]
-        : [],
+    isUncertain: false,
+    uncertaintyReasons: [],
     advisoryNotice: ADVISORY_NOTICE,
     summary,
     recommendedActions:
       maliciousCount > 0
         ? [
-            "Review each flagged URL and its host and path breakdown in Technical Evidence below before opening any link.",
-            "Download the JSON summary report to archive or share inert indicators with your security team.",
+            "Inspect each flagged URL and its host and path breakdown in Details below before opening any link.",
+            "Export the JSON summary report to archive or share inert indicators.",
           ]
-        : reviewTotalCount > 0
-          ? [
-              "Inspect the items marked for review in Technical Evidence below and verify unfamiliar domains independently.",
-            ]
-          : [
-              "No phishing or malware indicators were flagged across the submitted URLs.",
-            ],
+        : [
+            "No phishing or malware indicators were flagged across the submitted URLs.",
+          ],
     latencyMs: asNumber(summaryRaw.total_latency_ms),
     details: {
       kind: "url",

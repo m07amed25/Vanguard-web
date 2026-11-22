@@ -390,7 +390,7 @@ describe("upstream response normalizers", () => {
     }
   });
 
-  it("routes unsupported, unavailable, and uncertain URL single responses to review (never benign) and propagates uncertainty factors", () => {
+  it("keeps URL single verdicts strictly binary (benign or malicious) with no human-review state", () => {
     const unsupported = mapUrlSingleResponse({
       url: "javascript:alert(1)",
       status: "unsupported",
@@ -414,9 +414,10 @@ describe("upstream response normalizers", () => {
       analyzed_at: "2026-11-20T12:00:00Z",
     });
 
-    assert.equal(unsupported.verdict, "review");
+    assert.equal(unsupported.verdict, "benign");
+    assert.equal(unsupported.verdictLabel, "Benign");
     assert.equal(unsupported.coverage, "unsupported");
-    assert.equal(unsupported.isUncertain, true);
+    assert.equal(unsupported.isUncertain, false);
     assert.equal(unsupported.riskScore, null);
     assert.equal(unsupported.summary.includes("5-branch"), false);
     assert.equal(unsupported.summary.includes("WHATWG"), false);
@@ -437,9 +438,10 @@ describe("upstream response normalizers", () => {
       is_uncertain: true,
     });
 
-    assert.equal(unavailable.verdict, "review");
+    assert.equal(unavailable.verdict, "benign");
+    assert.equal(unavailable.verdictLabel, "Benign");
     assert.equal(unavailable.coverage, "unreadable");
-    assert.equal(unavailable.isUncertain, true);
+    assert.equal(unavailable.isUncertain, false);
 
     const uncertain = mapUrlSingleResponse({
       url: "https://vanguard-test-ten.vercel.app/",
@@ -467,13 +469,14 @@ describe("upstream response normalizers", () => {
       },
     });
 
-    assert.equal(uncertain.verdict, "review");
-    assert.equal(uncertain.coverage, "ambiguous");
-    assert.equal(uncertain.isUncertain, true);
-    assert.deepEqual(uncertain.uncertaintyReasons, ["high_prediction_entropy"]);
+    assert.equal(uncertain.verdict, "benign");
+    assert.equal(uncertain.verdictLabel, "Benign");
+    assert.equal(uncertain.coverage, "complete");
+    assert.equal(uncertain.isUncertain, false);
+    assert.deepEqual(uncertain.uncertaintyReasons, []);
   });
 
-  it("maps URL batch responses with mutually exclusive benignCount and uncertainCount and review precedence", () => {
+  it("maps URL batch responses strictly to benign and malicious counts without review states", () => {
     const mixedBatch = mapUrlBatchResponse({
       summary: {
         total_urls: 3,
@@ -533,34 +536,35 @@ describe("upstream response normalizers", () => {
       ],
     });
 
-    assert.equal(mixedBatch.verdict, "review");
+    assert.equal(mixedBatch.verdict, "benign");
+    assert.equal(mixedBatch.verdictLabel, "Benign");
     assert.equal(mixedBatch.coverage, "partial");
-    assert.equal(mixedBatch.isUncertain, true);
+    assert.equal(mixedBatch.isUncertain, false);
     assert.equal(mixedBatch.details.kind, "url");
     if (mixedBatch.details.kind === "url") {
       assert.equal(mixedBatch.details.items[0]?.verdict, "benign");
-      assert.equal(mixedBatch.details.items[1]?.verdict, "review");
-      assert.equal(mixedBatch.details.items[2]?.verdict, "review");
+      assert.equal(mixedBatch.details.items[1]?.verdict, "benign");
+      assert.equal(mixedBatch.details.items[2]?.verdict, "benign");
       assert.equal(mixedBatch.details.batchSummary?.totalUrls, 3);
       assert.equal(mixedBatch.details.batchSummary?.maliciousCount, 0);
-      assert.equal(mixedBatch.details.batchSummary?.benignCount, 1);
-      assert.equal(mixedBatch.details.batchSummary?.uncertainCount, 1);
+      assert.equal(mixedBatch.details.batchSummary?.benignCount, 3);
+      assert.equal(mixedBatch.details.batchSummary?.uncertainCount, 0);
       assert.equal(mixedBatch.details.batchSummary?.unsupportedCount, 1);
     }
   });
 
-  it("never falls back to benign on unrecognized URL statuses, empty batches, or encrypted/forced-review confidence", () => {
+  it("preserves binary URL verdicts on unrecognized statuses while enforcing review on SMS, Office, and encrypted PDF", () => {
     const errorUrl = mapUrlSingleResponse({
       url: "https://example.test/timeout",
       status: "error",
       reason_code: "internal_timeout",
       is_malicious: false,
     });
-    assert.equal(errorUrl.verdict, "review");
+    assert.equal(errorUrl.verdict, "benign");
     assert.equal(errorUrl.coverage, "unreadable");
 
     const emptyUrlBatch = mapUrlBatchResponse({ results: [] });
-    assert.equal(emptyUrlBatch.verdict, "review");
+    assert.equal(emptyUrlBatch.verdict, "benign");
     assert.equal(emptyUrlBatch.coverage, "unreadable");
 
     const emptySmsBatch = mapSmsBatchResponse({ results: [] });

@@ -1,11 +1,20 @@
 "use client";
 
-import { AlertCircle, Loader2, Paperclip, RefreshCw, X } from "lucide-react";
+import {
+  AlertCircle,
+  Link2,
+  List,
+  Loader2,
+  Paperclip,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import {
   useEffect,
   useId,
   useRef,
   useState,
+  type ClipboardEvent,
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
@@ -25,8 +34,8 @@ import type {
   ScanOutcome,
 } from "@/lib/features/types";
 import { CopyButton } from "./copy-button";
-import { ScanResultPanel } from "./scan-result-panel";
-import { useTriageHandoff } from "./workspace-provider";
+import { UrlScanResult } from "./url-scan-result";
+import { useReadiness, useTriageHandoff } from "./workspace-provider";
 
 type UrlMode = "single" | "batch";
 
@@ -35,6 +44,90 @@ interface RunScanOverrides {
   singleUrl?: string;
   batchText?: string;
   batchFile?: File | null;
+}
+
+function parseBatchLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => Boolean(line) && !line.startsWith("#"));
+}
+
+export function UrlReadinessInline() {
+  const {
+    snapshot,
+    isChecking,
+    isInitialLoading,
+    refreshError,
+    refreshHealth,
+  } = useReadiness();
+
+  const current = snapshot.features.url;
+  const isReady = !isInitialLoading && Boolean(current?.ready);
+  const isUnavailable = !isInitialLoading && !current?.ready;
+
+  return (
+    <div className="flex flex-col items-start gap-1 sm:items-end">
+      <div className="flex items-center gap-1">
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-xs"
+        >
+          {isInitialLoading && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-info bg-info/40 motion-safe:animate-pulse forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Checking…</span>
+            </>
+          )}
+          {isReady && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full border border-transparent bg-positive forced-colors:border-[CanvasText]"
+              />
+              <span className="text-muted-foreground">Ready</span>
+            </>
+          )}
+          {isUnavailable && (
+            <>
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rotate-45 border border-transparent bg-caution forced-colors:border-[CanvasText]"
+              />
+              <span className="font-medium text-caution">Unavailable</span>
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={isChecking}
+          aria-label="Refresh URL scanner status"
+          title="Refresh URL scanner status"
+          onClick={() => void refreshHealth()}
+          className="-me-3 inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface hover:text-foreground active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={`size-3.5 shrink-0 ${
+              isChecking ? "motion-safe:animate-spin motion-reduce:hidden" : ""
+            }`}
+            strokeWidth={1.75}
+          />
+        </button>
+      </div>
+
+      {refreshError && (
+        <p role="status" aria-live="polite" className="text-xs text-caution">
+          {refreshError}
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function UrlScannerWorkspace() {
@@ -66,11 +159,15 @@ export function UrlScannerWorkspace() {
   const [liveStatus, setLiveStatus] = useState("");
 
   const isSubmitting = execState === "submitting";
+  const parsedBatchLines = parseBatchLines(batchText);
+  const trimmedSingleLength = singleUrl.trim().length;
+  const showSingleCounter = trimmedSingleLength > 500;
 
-  const parsedBatchLines = batchText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => Boolean(line) && !line.startsWith("#"));
+  function switchMode(next: UrlMode) {
+    setMode(next);
+    setFieldError("");
+    setErrorResponse(null);
+  }
 
   function selectBatchFile(next: File | null) {
     setBatchFile(next);
@@ -92,8 +189,10 @@ export function UrlScannerWorkspace() {
       fileInputRef.current.value = "";
     }
     setBatchFile(null);
+    setOutcome(null);
     setFieldError("");
     setErrorResponse(null);
+    setExecState("idle");
     setLiveStatus("Removed selected batch file.");
   }
 
@@ -118,6 +217,22 @@ export function UrlScannerWorkspace() {
     }
   }
 
+  function handleSinglePaste(event: ClipboardEvent<HTMLInputElement>) {
+    const pasted = event.clipboardData.getData("text");
+    if (!/\r|\n/.test(pasted)) return;
+    const lines = parseBatchLines(pasted);
+    if (lines.length < 2) return;
+    event.preventDefault();
+    setMode("batch");
+    setBatchFile(null);
+    setBatchText(pasted);
+    setFieldError("");
+    setErrorResponse(null);
+    setLiveStatus(
+      `Switched to batch mode with ${lines.length} URLs. Submit when ready.`,
+    );
+  }
+
   async function runScan(overrides?: RunScanOverrides, supersede = false) {
     if (submittingRef.current && !supersede) return;
 
@@ -128,18 +243,15 @@ export function UrlScannerWorkspace() {
       overrides && "batchFile" in overrides
         ? (overrides.batchFile ?? null)
         : batchFile;
-    const targetBatchLines = targetBatchText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => Boolean(line) && !line.startsWith("#"));
+    const targetBatchLines = parseBatchLines(targetBatchText);
 
     if (targetMode === "single") {
       const trimmed = targetSingleUrl.trim();
       if (!trimmed) {
-        setFieldError("Paste or type an HTTP(S) URL or bare domain to inspect.");
+        setFieldError("Enter an HTTP(S) URL or domain to inspect.");
         setErrorResponse(null);
         setExecState("idle");
-        setLiveStatus("Enter an HTTP(S) URL or bare domain before starting the scan.");
+        setLiveStatus("Enter an HTTP(S) URL or domain before starting the scan.");
         return;
       }
       if (trimmed.length > URL_MAX_LENGTH) {
@@ -160,7 +272,7 @@ export function UrlScannerWorkspace() {
         return;
       }
       if (targetBatchFile.size > FIVE_MIB) {
-        setFieldError("URL batch import files must be 5 MiB or smaller.");
+        setFieldError("Batch files must be 5 MiB or smaller.");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Selected file exceeds the 5 MiB limit.");
@@ -168,9 +280,7 @@ export function UrlScannerWorkspace() {
       }
     } else {
       if (targetBatchLines.length === 0) {
-        setFieldError(
-          "Enter at least 1 URL (one per line) or import a batch file.",
-        );
+        setFieldError("Enter at least 1 URL or import a batch file.");
         setErrorResponse(null);
         setExecState("idle");
         setLiveStatus("Enter at least 1 URL or import a batch file.");
@@ -178,7 +288,7 @@ export function UrlScannerWorkspace() {
       }
       if (targetBatchLines.length > URL_MAX_BATCH_ITEMS) {
         setFieldError(
-          `Batch scans accept at most ${URL_MAX_BATCH_ITEMS} URLs at a time (currently ${targetBatchLines.length}).`,
+          `Batch scans accept up to ${URL_MAX_BATCH_ITEMS} URLs at a time (currently ${targetBatchLines.length}).`,
         );
         setErrorResponse(null);
         setExecState("idle");
@@ -212,8 +322,8 @@ export function UrlScannerWorkspace() {
     setExecState("submitting");
     setLiveStatus(
       targetMode === "batch"
-        ? "Analyzing URL batch with the offline URL structure and link pattern scanner. Please wait..."
-        : "Analyzing URL with the offline URL structure and link pattern scanner. Please wait...",
+        ? "Analyzing URL batch offline. Please wait."
+        : "Analyzing URL offline. Please wait.",
     );
 
     try {
@@ -287,7 +397,7 @@ export function UrlScannerWorkspace() {
         status: "failed",
         code: "service_unavailable",
         message:
-          "Network connection was interrupted before the scan finished. Your URL input is preserved — try again.",
+          "Connection was interrupted before the scan finished. Your input is kept — try again.",
         retryable: true,
         diagnosticId: "network-interrupted",
       };
@@ -315,14 +425,19 @@ export function UrlScannerWorkspace() {
     if (handoff.mode === "batch") {
       setMode("batch");
       setBatchText(handoff.text);
-      setLiveStatus("Loaded your URL list into batch mode. Review and submit when ready.");
+      setLiveStatus(
+        "Loaded your URL list into batch mode. Review and submit when ready.",
+      );
       return;
     }
 
     setMode("single");
     setSingleUrl(handoff.text);
     if (handoff.autoSubmit) {
-      void runScan({ mode: "single", singleUrl: handoff.text, batchFile: null }, true);
+      void runScan(
+        { mode: "single", singleUrl: handoff.text, batchFile: null },
+        true,
+      );
     }
   }
 
@@ -371,8 +486,32 @@ export function UrlScannerWorkspace() {
     setLiveStatus("Cleared previous scan. Ready for a new URL check.");
   }
 
+  const submitButton = (
+    <button
+      id="features-url-submit"
+      type="submit"
+      disabled={isSubmitting}
+      className="inline-flex min-h-12 flex-[2_1_0%] cursor-pointer items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground sm:flex-none"
+    >
+      {isSubmitting && (
+        <Loader2
+          aria-hidden="true"
+          className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
+          strokeWidth={1.75}
+        />
+      )}
+      <span>
+        {isSubmitting
+          ? "Scanning…"
+          : mode === "batch"
+            ? "Scan batch"
+            : "Scan URL"}
+      </span>
+    </button>
+  );
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {liveStatus}
       </p>
@@ -384,18 +523,16 @@ export function UrlScannerWorkspace() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         noValidate
-        className={`workspace-panel divide-y divide-outline overflow-hidden rounded-2xl border bg-surface motion-safe:transition-colors motion-safe:duration-150 ${
-          fieldError
-            ? "border-danger"
-            : dragging
-              ? "border-accent bg-surface-selected/35"
-              : "border-outline"
+        className={`space-y-3 rounded-xl motion-safe:transition-[outline-color] motion-safe:duration-150 ${
+          dragging ? "outline-2 outline-dashed outline-accent outline-offset-8" : ""
         }`}
       >
         <input
           ref={fileInputRef}
           id={fileInputId}
           type="file"
+          tabIndex={-1}
+          aria-hidden="true"
           accept={feature.acceptedExtensions.join(",")}
           disabled={isSubmitting}
           className="sr-only"
@@ -406,69 +543,110 @@ export function UrlScannerWorkspace() {
           }}
         />
 
-        {/* Top hairline bar: mode tabs + live counter */}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 sm:px-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="flex items-baseline gap-2">
+            {mode === "single" ? (
+              <>
+                <label
+                  htmlFor={singleInputId}
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Link or domain
+                </label>
+                {showSingleCounter && (
+                  <span
+                    className={`font-mono text-xs tabular-nums ${
+                      trimmedSingleLength > URL_MAX_LENGTH
+                        ? "text-danger"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {trimmedSingleLength.toLocaleString()} /{" "}
+                    {URL_MAX_LENGTH.toLocaleString()}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                {batchFile ? (
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Batch file
+                  </span>
+                ) : (
+                  <label
+                    htmlFor={batchInputId}
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    URLs, one per line
+                  </label>
+                )}
+
+                {!batchFile && parsedBatchLines.length > 0 && (
+                  <span
+                    className={`font-mono text-xs tabular-nums ${
+                      parsedBatchLines.length > URL_MAX_BATCH_ITEMS
+                        ? "text-danger"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {parsedBatchLines.length} / {URL_MAX_BATCH_ITEMS}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
           <div
             role="group"
             aria-label="Inspection mode"
-            className="flex flex-wrap items-center gap-5"
+            className="inline-flex items-center gap-0.5 rounded-xl border border-border-control/70 bg-canvas p-0.5"
           >
             <button
               type="button"
-              disabled={isSubmitting}
               aria-pressed={mode === "single"}
-              onClick={() => {
-                setMode("single");
-                setFieldError("");
-                setErrorResponse(null);
-              }}
-              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              disabled={isSubmitting}
+              onClick={() => switchMode("single")}
+              className={`inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] px-3 text-xs font-medium motion-safe:transition-colors motion-safe:duration-150 disabled:cursor-default disabled:opacity-50 ${
                 mode === "single"
-                  ? "workspace-nav-active border-accent text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                  ? "workspace-nav-active bg-surface-hover text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Single URL
+              <Link2
+                aria-hidden="true"
+                className={`size-3.5 shrink-0 ${
+                  mode === "single" ? "text-accent" : ""
+                }`}
+                strokeWidth={1.75}
+              />
+              <span>Single</span>
             </button>
 
             <button
               type="button"
-              disabled={isSubmitting}
               aria-pressed={mode === "batch"}
-              onClick={() => {
-                setMode("batch");
-                setFieldError("");
-                setErrorResponse(null);
-              }}
-              className={`-mb-px inline-flex min-h-11 cursor-pointer items-center border-b-2 text-sm font-medium motion-safe:transition-colors motion-safe:duration-150 ${
+              disabled={isSubmitting}
+              onClick={() => switchMode("batch")}
+              className={`inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] px-3 text-xs font-medium motion-safe:transition-colors motion-safe:duration-150 disabled:cursor-default disabled:opacity-50 ${
                 mode === "batch"
-                  ? "workspace-nav-active border-accent text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                  ? "workspace-nav-active bg-surface-hover text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Batch (up to {URL_MAX_BATCH_ITEMS})
+              <List
+                aria-hidden="true"
+                className={`size-3.5 shrink-0 ${
+                  mode === "batch" ? "text-accent" : ""
+                }`}
+                strokeWidth={1.75}
+              />
+              <span>Batch</span>
             </button>
           </div>
-
-          <span className="py-2 font-mono text-xs text-muted-foreground tabular-nums">
-            {mode === "single"
-              ? `${singleUrl.trim().length.toLocaleString()} / ${URL_MAX_LENGTH.toLocaleString()}`
-              : batchFile
-                ? formatBytes(batchFile.size)
-                : `${parsedBatchLines.length} / ${URL_MAX_BATCH_ITEMS}`}
-          </span>
         </div>
 
-        {/* Main input body */}
-        <div className="px-5 py-5 sm:px-6">
-          {mode === "single" ? (
-            <div className="space-y-1.5">
-              <label
-                htmlFor={singleInputId}
-                className="text-xs font-medium text-muted-foreground"
-              >
-                HTTP(S) URL or bare domain
-              </label>
+        {mode === "single" ? (
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <input
                 id={singleInputId}
                 type="text"
@@ -482,179 +660,188 @@ export function UrlScannerWorkspace() {
                 maxLength={URL_MAX_LENGTH + 100}
                 aria-invalid={fieldError ? true : undefined}
                 aria-describedby={fieldError ? errorId : undefined}
-                placeholder="https://example.com/login or bare-domain.example.com"
+                placeholder="https://example.com/login or example.com"
+                onPaste={handleSinglePaste}
                 onChange={(event) => {
-                  setSingleUrl(event.currentTarget.value);
+                  const next = event.currentTarget.value;
+                  setSingleUrl(next);
                   if (fieldError) setFieldError("");
-                }}
-                className={`min-h-11 w-full rounded-lg border bg-canvas px-3.5 py-2 font-mono text-sm text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
-                  fieldError ? "border-danger" : "border-border-control"
-                }`}
-              />
-            </div>
-          ) : batchFile ? (
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-center gap-2 text-sm">
-                <Paperclip
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-accent"
-                  strokeWidth={1.75}
-                />
-                <span
-                  className="truncate font-mono text-foreground"
-                  title={batchFile.name}
-                >
-                  {batchFile.name}
-                </span>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
-                  · {formatBytes(batchFile.size)}
-                </span>
-                <CopyButton
-                  value={batchFile.name}
-                  ariaLabel="Copy selected batch filename"
-                />
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={openFilePicker}
-                  className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-                >
-                  Change file
-                </button>
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={clearBatchFile}
-                  aria-label="Remove selected batch file"
-                  className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-lg border border-border-control bg-canvas text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
-                >
-                  <X aria-hidden="true" className="size-4" strokeWidth={1.75} />
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <label
-                htmlFor={batchInputId}
-                className="text-xs font-medium text-muted-foreground"
-              >
-                Batch URLs (one per line)
-              </label>
-              <textarea
-                id={batchInputId}
-                rows={4}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                value={batchText}
-                disabled={isSubmitting}
-                aria-invalid={fieldError ? true : undefined}
-                aria-describedby={fieldError ? errorId : undefined}
-                placeholder={
-                  "Paste one URL per line, or drop a .txt, .csv, .json, or .jsonl file..."
-                }
-                onKeyDown={handleTextareaKeyDown}
-                onChange={(event) => {
-                  setBatchText(event.currentTarget.value);
-                  if (fieldError) setFieldError("");
-                }}
-                className={`min-h-28 w-full rounded-lg border bg-canvas px-3.5 py-2.5 font-mono text-sm leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
-                  fieldError ? "border-danger" : "border-border-control"
-                }`}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Footer action bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
-          <div className="flex flex-wrap items-center gap-2">
-            {mode === "batch" && !batchFile ? (
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={openFilePicker}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-              >
-                Import file
-              </button>
-            ) : (
-              <p className="max-w-[55ch] text-xs text-muted-foreground">
-                Enter full HTTP(S) URLs, IP addresses, or internationalized domains — links are never fetched or opened.
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {((mode === "single" && singleUrl.length > 0) ||
-              (mode === "batch" && !batchFile && batchText.length > 0)) && (
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => {
-                  if (mode === "single") {
-                    setSingleUrl("");
-                  } else {
-                    setBatchText("");
+                  if (next.trim().length === 0) {
+                    setOutcome(null);
+                    setErrorResponse(null);
+                    setExecState("idle");
                   }
-                  setFieldError("");
-                  setErrorResponse(null);
                 }}
-                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border-control bg-canvas px-3 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50"
-              >
-                Clear
-              </button>
-            )}
+                className={`min-h-12 min-w-0 flex-1 rounded-xl border bg-transparent px-4 py-2.5 font-mono text-sm text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                  fieldError ? "border-danger" : "border-border-control"
+                }`}
+              />
 
-            <button
-              id="features-url-submit"
-              type="submit"
-              disabled={isSubmitting}
-              className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-on-primary motion-safe:transition-colors motion-safe:duration-150 hover:bg-primary-hover active:bg-primary-pressed disabled:cursor-default disabled:bg-surface-raised disabled:text-muted-foreground"
-            >
-              {isSubmitting && (
-                <Loader2
-                  aria-hidden="true"
-                  className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:hidden"
-                  strokeWidth={1.75}
-                />
-              )}
-              <span>
-                {isSubmitting
-                  ? "Scanning..."
-                  : mode === "batch"
-                    ? "Scan batch"
-                    : "Scan URL"}
-              </span>
-            </button>
+              <div className="flex w-full items-center gap-2 sm:w-auto">
+                {singleUrl.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => {
+                      setSingleUrl("");
+                      setOutcome(null);
+                      setFieldError("");
+                      setErrorResponse(null);
+                      setExecState("idle");
+                    }}
+                    aria-label="Clear URL"
+                    className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl border border-border-control bg-transparent px-4 text-sm font-medium text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50 sm:w-12 sm:flex-none sm:px-0"
+                  >
+                    <X aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+                    <span className="sm:hidden">Clear</span>
+                  </button>
+                )}
+                {submitButton}
+              </div>
           </div>
-        </div>
+        ) : (
+          <div className="space-y-3">
+            {batchFile ? (
+              <div className="flex flex-col gap-3 rounded-xl border border-border-control px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2 text-sm">
+                  <Paperclip
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-accent"
+                    strokeWidth={1.75}
+                  />
+                  <span
+                    className="truncate font-mono text-foreground"
+                    title={batchFile.name}
+                  >
+                    {batchFile.name}
+                  </span>
+                  <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+                    {formatBytes(batchFile.size)}
+                  </span>
+                  <CopyButton
+                    value={batchFile.name}
+                    ariaLabel="Copy selected batch filename"
+                  />
+                </div>
+
+                <div className="flex w-full items-center gap-2 sm:w-auto">
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={clearBatchFile}
+                    aria-label="Remove selected batch file"
+                    className="inline-flex min-h-12 min-w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                  >
+                    <X aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.75} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={openFilePicker}
+                    className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50 sm:flex-none"
+                  >
+                    Change
+                  </button>
+                  {submitButton}
+                </div>
+              </div>
+            ) : (
+              <>
+                <textarea
+                  id={batchInputId}
+                  rows={4}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={batchText}
+                  disabled={isSubmitting}
+                  aria-invalid={fieldError ? true : undefined}
+                  aria-describedby={fieldError ? errorId : undefined}
+                  placeholder="Paste one URL per line, or drop a .txt, .csv, .json, or .jsonl file"
+                  onKeyDown={handleTextareaKeyDown}
+                  onChange={(event) => {
+                    const next = event.currentTarget.value;
+                    setBatchText(next);
+                    if (fieldError) setFieldError("");
+                    if (next.trim().length === 0) {
+                      setOutcome(null);
+                      setErrorResponse(null);
+                      setExecState("idle");
+                    }
+                  }}
+                  className={`min-h-32 w-full rounded-xl border bg-transparent px-4 py-3 font-mono text-sm leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:border-accent disabled:opacity-60 ${
+                    fieldError ? "border-danger" : "border-border-control"
+                  }`}
+                />
+
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={openFilePicker}
+                    className="inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover active:bg-surface-selected disabled:cursor-default disabled:opacity-50 sm:w-auto"
+                  >
+                    <Paperclip
+                      aria-hidden="true"
+                      className="size-3.5 shrink-0 text-muted-foreground"
+                      strokeWidth={1.75}
+                    />
+                    <span>Import file</span>
+                  </button>
+
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    {batchText.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isSubmitting}
+                        onClick={() => {
+                          setBatchText("");
+                          setOutcome(null);
+                          setFieldError("");
+                          setErrorResponse(null);
+                          setExecState("idle");
+                        }}
+                        className="inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center rounded-xl border border-border-control bg-transparent px-3.5 text-sm font-medium text-muted-foreground motion-safe:transition-colors motion-safe:duration-150 hover:bg-surface-hover hover:text-foreground disabled:cursor-default disabled:opacity-50 sm:flex-none"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {submitButton}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {fieldError && (
-          <div className="bg-danger-bg/20 px-4 py-2.5 sm:px-5">
-            <p id={errorId} role="alert" className="text-xs font-medium text-danger break-words">
-              {fieldError}
+          <div className="rounded-xl bg-danger-bg/45 px-3.5 py-2.5">
+            <p
+              id={errorId}
+              role="alert"
+              className="flex items-start gap-2 text-xs font-medium text-danger"
+            >
+              <AlertCircle
+                aria-hidden="true"
+                className="mt-0.5 size-3.5 shrink-0"
+                strokeWidth={1.75}
+              />
+              <span className="break-words">{fieldError}</span>
             </p>
           </div>
         )}
 
         {isSubmitting && (
-          <div
-            aria-busy="true"
-            className="px-4 py-2.5 text-xs text-muted-foreground sm:px-5"
-          >
-            Checking link structure, domain patterns, and path signals offline — links are never fetched or opened...
-          </div>
+          <p aria-busy="true" className="text-xs text-muted-foreground">
+            Inspecting link structure and domain patterns offline…
+          </p>
         )}
 
         {errorResponse && (
           <div
             role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 bg-danger-bg/20 px-4 py-2.5 text-xs sm:px-5"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-danger-bg/45 px-3.5 py-2.5 text-xs"
           >
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AlertCircle
@@ -662,7 +849,7 @@ export function UrlScannerWorkspace() {
                 className="size-3.5 shrink-0 text-danger"
                 strokeWidth={1.75}
               />
-              <span className="font-medium text-foreground break-words">
+              <span className="break-words font-medium text-foreground">
                 {errorResponse.message}
               </span>
               <span className="font-mono text-muted-foreground">
@@ -681,7 +868,11 @@ export function UrlScannerWorkspace() {
                 onClick={() => void runScan()}
                 className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border-control bg-surface px-3 text-xs font-medium text-foreground hover:bg-surface-hover active:bg-surface-selected"
               >
-                <RefreshCw aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
+                <RefreshCw
+                  aria-hidden="true"
+                  className="size-3.5"
+                  strokeWidth={1.75}
+                />
                 <span>Retry</span>
               </button>
             )}
@@ -690,7 +881,7 @@ export function UrlScannerWorkspace() {
       </form>
 
       {outcome && !isSubmitting && (
-        <ScanResultPanel outcome={outcome} onReset={handleReset} />
+        <UrlScanResult outcome={outcome} onReset={handleReset} />
       )}
     </div>
   );
